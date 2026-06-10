@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>revTr Health Monitor</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e0e0e0;
+      --muted: #888;
+      --green: #2ecc71;
+      --red: #e74c3c;
+      --amber: #f39c12;
+      --blue: #3498db;
+      --purple: #9b59b6;
+      --pink: #e91e8a;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { font-size: 22px; font-weight: 600; }
+    header h1 span { color: var(--blue); }
+    .meta { font-size: 13px; color: var(--muted); }
+    .meta .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    .meta .dot.live { background: var(--green); animation: pulse 2s infinite; }
+    .meta .dot.dead { background: var(--red); }
+    .meta .dot.loading { background: var(--amber); }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* Grid */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .card .value { font-size: 28px; font-weight: 700; }
+    .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .card .value.ok { color: var(--green); }
+    .card .value.warn { color: var(--amber); }
+    .card .value.bad { color: var(--red); }
+
+    /* Section title */
+    .section-title {
+      font-size: 13px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+      margin-top: 8px;
+    }
+
+    /* Alert banner */
+    .alert-banner {
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 24px;
+      font-size: 14px;
+      display: none;
+    }
+    .alert-banner.warning {
+      display: block;
+      background: rgba(243, 156, 18, 0.12);
+      border: 1px solid var(--amber);
+      color: var(--amber);
+    }
+    .alert-banner.high {
+      display: block;
+      background: rgba(231, 76, 60, 0.12);
+      border: 1px solid var(--red);
+      color: var(--red);
+    }
+    .alert-banner.critical {
+      display: block;
+      background: rgba(231, 76, 60, 0.25);
+      border: 2px solid var(--red);
+      color: var(--red);
+      font-weight: 600;
+    }
+    .alert-banner.ok {
+      display: block;
+      background: rgba(46, 204, 113, 0.08);
+      border: 1px solid rgba(46, 204, 113, 0.3);
+      color: var(--green);
+    }
+
+    /* Chart area */
+    .chart-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .chart-section h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
+    .chart-container { position: relative; width: 100%; height: 220px; }
+    canvas { width: 100% !important; height: 100% !important; }
+
+    /* Table */
+    .table-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .table-section h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+    tr:last-child td { border-bottom: none; }
+    td.num { font-variant-numeric: tabular-nums; text-align: right; }
+    th.num { text-align: right; }
+
+    .loading-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(15, 17, 23, 0.85);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; color: var(--muted); z-index: 999;
+    }
+
+    #siteMap { height: 350px; border-radius: 8px; }
+    .leaflet-popup-content { font-size: 13px; line-height: 1.5; }
+    .leaflet-popup-content strong { font-size: 14px; }
+
+    footer { margin-top: 32px; text-align: center; font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="loading-overlay" id="loading">Loading data from BigQuery...</div>
+
+  <header>
+    <h1><span>revTr</span> Health Monitor</h1>
+    <div class="meta">
+      <span class="dot loading" id="apiDot"></span>
+      <span id="apiStatus">Checking API...</span>
+      &nbsp;&middot;&nbsp;
+      <span id="refreshTime">--</span>
+    </div>
+  </header>
+
+  <div class="alert-banner" id="alertBanner"></div>
+
+  <!-- Row 1: core health -->
+  <div class="section-title">Core Health</div>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Measurements Today</div>
+      <div class="value" id="totalToday">--</div>
+      <div class="sub" id="totalBaseline">baseline: --</div>
+    </div>
+    <div class="card">
+      <div class="label">Reach Rate</div>
+      <div class="value" id="reachRate">--</div>
+      <div class="sub" id="reachBaseline">baseline: --</div>
+    </div>
+    <div class="card">
+      <div class="label">Fail Rate</div>
+      <div class="value" id="failRate">--</div>
+      <div class="sub" id="failBaseline">baseline: --</div>
+    </div>
+    <div class="card">
+      <div class="label">Queries Run Today</div>
+      <div class="value" id="queriesToday">--</div>
+      <div class="sub">revTr submissions</div>
+    </div>
+  </div>
+
+  <!-- Row 2: hop quality -->
+  <div class="section-title">Hop Quality (excluding GCP clients, reaching measurements)</div>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Frac Interdomain Assumption</div>
+      <div class="value" id="fracType12">--</div>
+      <div class="sub" id="fracType12Sub">--</div>
+    </div>
+    <div class="card">
+      <div class="label">Frac Fishy Type 4</div>
+      <div class="value" id="fracFishy4">--</div>
+      <div class="sub" id="fracFishy4Sub">--</div>
+    </div>
+  </div>
+
+  <div class="chart-section">
+    <h2>Measurements per M-Lab Site (today, excluding GCP clients)</h2>
+    <div id="siteMap"></div>
+  </div>
+
+  <div class="chart-section">
+    <h2>7-Day Trend &mdash; Measurements &amp; Reach Rate</h2>
+    <div class="chart-container">
+      <canvas id="trendChart"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-section">
+    <h2>7-Day Trend &mdash; Hop Quality (excluding GCP clients)</h2>
+    <div class="chart-container">
+      <canvas id="hopChart"></canvas>
+    </div>
+  </div>
+
+  <div class="table-section">
+    <h2>Daily Breakdown (last 8 days)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th class="num">Total</th>
+          <th class="num">Reaches</th>
+          <th class="num">Failed</th>
+          <th class="num">Reach Rate</th>
+          <th class="num">Fail Rate</th>
+        </tr>
+      </thead>
+      <tbody id="dailyTableBody">
+        <tr><td colspan="6" style="color:var(--muted)">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="table-section">
+    <h2>Hop Quality Breakdown (last 8 days)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th class="num">Reaching</th>
+          <th class="num">Interdom Assumption</th>
+          <th class="num">Fishy T4</th>
+          <th class="num">% Interdom Assump</th>
+          <th class="num">% Fishy T4</th>
+        </tr>
+      </thead>
+      <tbody id="hopTableBody">
+        <tr><td colspan="8" style="color:var(--muted)">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    Auto-refreshes every hour &middot; HERMES / M-Lab
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script>
+    // After deploying with deploy.sh, replace this URL with your Cloud Run URL.
+    // Example: 'https://revtr-health-api-abc123-uc.a.run.app'
+    const API_BASE = 'http://136.116.232.100:5050';
+
+    let trendChart = null;
+    let hopChart = null;
+    let siteMap = null;
+    let siteMarkers = null;
+
+    async function fetchJSON(path) {
+      const r = await fetch(API_BASE + path);
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    }
+
+    function fmt(n, d=0) {
+      if (n == null) return '--';
+      return Number(n).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+    }
+
+    function pct(n) {
+      if (n == null) return '--';
+      return (n * 100).toFixed(1) + '%';
+    }
+
+    function rateClass(current, baseline, higher_is_bad) {
+      if (current == null || baseline == null) return '';
+      const diff = higher_is_bad ? current - baseline : baseline - current;
+      if (diff > 0.1) return 'bad';
+      if (diff > 0.05) return 'warn';
+      return 'ok';
+    }
+
+    async function refresh() {
+      try {
+        const [health, api, queries, hq, sitesData] = await Promise.all([
+          fetchJSON('/api/health'),
+          fetchJSON('/api/ping'),
+          fetchJSON('/api/queries_today'),
+          fetchJSON('/api/hop_quality'),
+          fetchJSON('/api/sites'),
+        ]);
+
+        // API status dot
+        const dot = document.getElementById('apiDot');
+        const st = document.getElementById('apiStatus');
+        if (api.alive) {
+          dot.className = 'dot live';
+          st.textContent = `API OK (${api.sources_count} sources)`;
+        } else {
+          dot.className = 'dot dead';
+          st.textContent = `API unreachable: ${api.error || 'unknown'}`;
+        }
+
+        // Core health cards
+        const today = health.today || {};
+        const baseline = health.baseline || {};
+
+        document.getElementById('totalToday').textContent = fmt(today.total_measurements);
+        document.getElementById('totalBaseline').textContent = `baseline median: ${fmt(baseline.total_measurements)}`;
+
+        const reachEl = document.getElementById('reachRate');
+        reachEl.textContent = pct(today.reach_rate);
+        reachEl.className = 'value ' + rateClass(today.reach_rate, baseline.reach_rate, false);
+        document.getElementById('reachBaseline').textContent = `baseline median: ${pct(baseline.reach_rate)}`;
+
+        const failEl = document.getElementById('failRate');
+        failEl.textContent = pct(today.fail_rate);
+        failEl.className = 'value ' + rateClass(today.fail_rate, baseline.fail_rate, true);
+        document.getElementById('failBaseline').textContent = `baseline median: ${pct(baseline.fail_rate)}`;
+
+        const volEl = document.getElementById('totalToday');
+        if (today.total_measurements != null && baseline.total_measurements != null) {
+          const ratio = today.total_measurements / (baseline.total_measurements || 1);
+          volEl.className = 'value ' + (ratio < 0.5 ? 'bad' : ratio < 0.75 ? 'warn' : 'ok');
+        }
+
+        document.getElementById('queriesToday').textContent = fmt(queries.count);
+
+        // Alert banner with severity
+        const banner = document.getElementById('alertBanner');
+        const severity = health.severity || 'ok';
+        if (health.triggered) {
+          banner.className = 'alert-banner ' + severity;
+          const label = severity.toUpperCase();
+          banner.innerHTML = `<strong>[${label}]</strong> ` + (health.reasons || []).join(' &middot; ');
+        } else {
+          banner.className = 'alert-banner ok';
+          banner.textContent = 'All health checks passing.';
+        }
+
+        // Hop quality cards — today = last entry in daily array
+        const hqDays = hq.daily || [];
+        const hqToday = hqDays.length ? hqDays[hqDays.length - 1] : {};
+        const hqBaseline = hqDays.slice(0, -1);
+
+        document.getElementById('fracType12').textContent = pct(hqToday.frac_type12);
+        document.getElementById('fracFishy4').textContent = pct(hqToday.frac_fishy_type4);
+
+        if (hqBaseline.length) {
+          const medType12 = median(hqBaseline.map(d => d.frac_type12));
+          const medFishy4 = median(hqBaseline.map(d => d.frac_fishy_type4));
+          document.getElementById('fracType12Sub').textContent = `baseline median: ${pct(medType12)}`;
+          document.getElementById('fracFishy4Sub').textContent = `baseline median: ${pct(medFishy4)}`;
+        }
+
+        // Trend chart
+        const days = health.daily || [];
+        const labels = days.map(d => d.day);
+        const totals = days.map(d => d.total_measurements);
+        const reaches = days.map(d => d.reach_rate);
+
+        if (trendChart) trendChart.destroy();
+        const ctx1 = document.getElementById('trendChart').getContext('2d');
+        trendChart = new Chart(ctx1, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: 'Measurements',
+                data: totals,
+                backgroundColor: 'rgba(52, 152, 219, 0.6)',
+                borderColor: 'rgba(52, 152, 219, 1)',
+                borderWidth: 1,
+                yAxisID: 'y',
+                order: 2,
+              },
+              {
+                label: 'Reach Rate',
+                data: reaches,
+                type: 'line',
+                borderColor: 'rgba(46, 204, 113, 1)',
+                backgroundColor: 'rgba(46, 204, 113, 0.1)',
+                fill: true,
+                tension: 0.3,
+                pointRadius: 4,
+                yAxisID: 'y1',
+                order: 1,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#888' } } },
+            scales: {
+              x: { ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+              y: {
+                position: 'left',
+                title: { display: true, text: 'Measurements', color: '#888' },
+                ticks: { color: '#888' },
+                grid: { color: '#2a2d3a' },
+              },
+              y1: {
+                position: 'right',
+                min: 0, max: 1,
+                title: { display: true, text: 'Reach Rate', color: '#888' },
+                ticks: { color: '#888', callback: v => (v*100)+'%' },
+                grid: { drawOnChartArea: false },
+              },
+            },
+          },
+        });
+
+        // Hop quality chart
+        const hqLabels = hqDays.map(d => d.day);
+        if (hopChart) hopChart.destroy();
+        const ctx2 = document.getElementById('hopChart').getContext('2d');
+        hopChart = new Chart(ctx2, {
+          type: 'line',
+          data: {
+            labels: hqLabels,
+            datasets: [
+              {
+                label: 'Interdomain Assumption',
+                data: hqDays.map(d => d.frac_type12),
+                borderColor: 'rgba(155, 89, 182, 1)',
+                backgroundColor: 'rgba(155, 89, 182, 0.1)',
+                fill: false,
+                tension: 0.3,
+                pointRadius: 4,
+              },
+              {
+                label: 'Fishy Type 4',
+                data: hqDays.map(d => d.frac_fishy_type4),
+                borderColor: 'rgba(233, 30, 138, 1)',
+                backgroundColor: 'rgba(233, 30, 138, 0.1)',
+                fill: false,
+                tension: 0.3,
+                pointRadius: 4,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#888' } } },
+            scales: {
+              x: { ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+              y: {
+                min: 0, max: 1,
+                title: { display: true, text: 'Fraction', color: '#888' },
+                ticks: { color: '#888', callback: v => (v*100)+'%' },
+                grid: { color: '#2a2d3a' },
+              },
+            },
+          },
+        });
+
+        // Health table
+        const tbody = document.getElementById('dailyTableBody');
+        tbody.innerHTML = days.slice().reverse().map(d => `
+          <tr>
+            <td>${d.day}</td>
+            <td class="num">${fmt(d.total_measurements)}</td>
+            <td class="num">${fmt(d.reaches_count)}</td>
+            <td class="num">${fmt(d.failed_count)}</td>
+            <td class="num">${pct(d.reach_rate)}</td>
+            <td class="num">${pct(d.fail_rate)}</td>
+          </tr>
+        `).join('');
+
+        // Hop quality table
+        const htbody = document.getElementById('hopTableBody');
+        htbody.innerHTML = hqDays.slice().reverse().map(d => `
+          <tr>
+            <td>${d.day}</td>
+            <td class="num">${fmt(d.total_reaching)}</td>
+            <td class="num">${fmt(d.type12_count)}</td>
+            <td class="num">${fmt(d.fishy_type4_count)}</td>
+            <td class="num">${pct(d.frac_type12)}</td>
+            <td class="num">${pct(d.frac_fishy_type4)}</td>
+          </tr>
+        `).join('');
+
+        // Site map
+        const sites = sitesData.sites || [];
+        if (!siteMap) {
+          siteMap = L.map('siteMap', { scrollWheelZoom: true }).setView([20, 0], 2);
+          L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap &copy; CARTO',
+            maxZoom: 18,
+          }).addTo(siteMap);
+          siteMarkers = L.layerGroup().addTo(siteMap);
+        }
+        siteMarkers.clearLayers();
+        const maxCount = Math.max(...sites.map(s => s.count), 1);
+        sites.forEach(s => {
+          if (s.lat == null || s.lng == null) return;
+          const radius = 5 + 20 * Math.sqrt(s.count / maxCount);
+          const circle = L.circleMarker([s.lat, s.lng], {
+            radius,
+            fillColor: '#3498db',
+            color: '#2980b9',
+            weight: 1,
+            fillOpacity: 0.7,
+          });
+          circle.bindPopup(
+            `<strong>${s.site}</strong><br>${s.city}, ${s.country}<br>${fmt(s.count)} measurements`
+          );
+          siteMarkers.addLayer(circle);
+        });
+
+        document.getElementById('refreshTime').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        document.getElementById('loading').style.display = 'none';
+
+      } catch (err) {
+        console.error(err);
+        document.getElementById('loading').textContent = 'Error loading data: ' + err.message;
+      }
+    }
+
+    function median(arr) {
+      if (!arr.length) return 0;
+      const s = arr.slice().sort((a, b) => a - b);
+      const mid = Math.floor(s.length / 2);
+      return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+    }
+
+    refresh();
+    setInterval(refresh, 60 * 60 * 1000);
+  </script>
+</body>
+</html>
