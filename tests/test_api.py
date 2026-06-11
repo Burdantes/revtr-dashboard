@@ -35,9 +35,14 @@ def test_health_range_reads_summary(client, monkeypatch):
 
 
 def test_failures_endpoint(client, monkeypatch):
+    import numpy as np
+    # Mirror real BigQuery output: repeated struct -> numpy.ndarray of dicts,
+    # and a zero-failure day -> NULL array (None/NaN).
     df = pd.DataFrame([
+        {"day": date(2026, 6, 9), "failed_count": 0, "fail_reasons": None},
         {"day": date(2026, 6, 10), "failed_count": 30,
-         "fail_reasons": [{"reason": "NO_RESP", "cnt": 20}, {"reason": "TIMEOUT", "cnt": 10}]},
+         "fail_reasons": np.array([{"reason": "NO_RESP", "cnt": 20},
+                                   {"reason": "TIMEOUT", "cnt": 10}], dtype=object)},
     ])
     monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
     resp = client.get("/api/failures?range=7d")
@@ -45,8 +50,9 @@ def test_failures_endpoint(client, monkeypatch):
     data = resp.get_json()
     assert data["totals"]["NO_RESP"] == 20
     assert data["totals"]["TIMEOUT"] == 10
-    assert data["series"][0]["day"] == "2026-06-10"
-    assert data["series"][0]["reasons"]["NO_RESP"] == 20
+    assert data["series"][-1]["day"] == "2026-06-10"
+    assert data["series"][-1]["reasons"]["NO_RESP"] == 20
+    assert data["series"][0]["reasons"] == {}  # zero-failure day
 
 
 def test_hops_endpoint(client, monkeypatch):

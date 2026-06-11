@@ -520,7 +520,11 @@ def api_failures():
     series = []
     totals: dict[str, int] = {}
     for _, row in summary.iterrows():
-        reasons = {r["reason"]: int(r["cnt"]) for r in (row.get("fail_reasons") or [])}
+        # fail_reasons is a numpy.ndarray of dicts (or None/NaN on zero-failure
+        # days). Avoid `arr or []` — an ndarray's truth value is ambiguous.
+        fr = row["fail_reasons"]
+        items = [] if fr is None or isinstance(fr, float) else list(fr)
+        reasons = {r["reason"]: int(r["cnt"]) for r in items}
         for k, v in reasons.items():
             totals[k] = totals.get(k, 0) + v
         series.append({"day": row["day"].isoformat(),
