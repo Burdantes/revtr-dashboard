@@ -23,7 +23,7 @@ from typing import Any
 
 import pandas as pd
 import requests
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
 
 try:
@@ -45,6 +45,23 @@ REVTR_BASE_URL = os.getenv(
 )
 BQ_PROJECT = os.getenv("BQ_PROJECT", "measurement-lab")
 BASELINE_DAYS = int(os.getenv("REVTR_BASELINE_DAYS", "7"))
+
+# Long-range panels read the pre-aggregated rollup table. Reads of that table
+# bill to the nsf project (SUMMARY_PROJECT); raw revtr_raw scans keep billing to
+# BQ_PROJECT (measurement-lab). See fetch_summary / get_summary_client.
+RANGE_DAYS = {"7d": 7, "30d": 30, "1y": 365}
+SUMMARY_PROJECT = os.getenv("SUMMARY_PROJECT", "nsf-2148275-66720")
+SUMMARY_TABLE = os.getenv(
+    "SUMMARY_TABLE", "nsf-2148275-66720.revtr_dashboard.daily_summary"
+)
+
+
+def _range_to_window(range_str: str, today: date) -> tuple[date, date]:
+    """Map a range key to an inclusive (start, end=today) date window."""
+    if range_str == "all":
+        return date(2000, 1, 1), today
+    days = RANGE_DAYS.get(range_str, 7)
+    return today - timedelta(days=days - 1), today
 
 # Alert thresholds (same defaults as revtr_health_alert.py)
 VOLUME_DROP_RATIO = 0.5
