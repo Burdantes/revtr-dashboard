@@ -157,6 +157,9 @@
     .leaflet-popup-content strong { font-size: 14px; }
 
     footer { margin-top: 32px; text-align: center; font-size: 12px; color: var(--muted); }
+    .range-selector { display:flex; gap:6px; margin-top:8px; }
+    .range-btn { background:#1e2230; color:#aaa; border:1px solid #2a2d3a; border-radius:6px; padding:4px 10px; cursor:pointer; font-size:13px; }
+    .range-btn.active { background:#3498db; color:#fff; border-color:#3498db; }
   </style>
 </head>
 <body>
@@ -169,6 +172,12 @@
       <span id="apiStatus">Checking API...</span>
       &nbsp;&middot;&nbsp;
       <span id="refreshTime">--</span>
+    </div>
+    <div class="range-selector" id="rangeSelector">
+      <button data-range="7d" class="range-btn active">7d</button>
+      <button data-range="30d" class="range-btn">30d</button>
+      <button data-range="1y" class="range-btn">1y</button>
+      <button data-range="all" class="range-btn">All</button>
     </div>
   </header>
 
@@ -208,9 +217,9 @@
       <div class="sub" id="fracType12Sub">--</div>
     </div>
     <div class="card">
-      <div class="label">Frac Fishy Type 4</div>
-      <div class="value" id="fracFishy4">--</div>
-      <div class="sub" id="fracFishy4Sub">--</div>
+      <div class="label" title="Type-4 (Intersected Record-Route Atlas) hop that creates an AS/geographic path loop">Suspect RR-Atlas Hop</div>
+      <div class="value" id="fracSuspect">--</div>
+      <div class="sub" id="fracSuspectSub">--</div>
     </div>
   </div>
 
@@ -220,7 +229,7 @@
   </div>
 
   <div class="chart-section">
-    <h2>7-Day Trend &mdash; Measurements &amp; Reach Rate</h2>
+    <h2>Trend &mdash; Measurements &amp; Reach Rate (selected range)</h2>
     <div class="chart-container">
       <canvas id="trendChart"></canvas>
     </div>
@@ -233,8 +242,35 @@
     </div>
   </div>
 
+  <div class="chart-section">
+    <h2>Failure Reasons (selected range)</h2>
+    <div class="chart-container"><canvas id="failChart"></canvas></div>
+  </div>
+
+  <div class="chart-section">
+    <h2>Hop Composition &mdash; Measured vs. Assumed (selected range)</h2>
+    <div class="chart-container"><canvas id="hopCompChart"></canvas></div>
+  </div>
+
+  <div class="chart-section">
+    <h2>Record-Route Responsiveness (selected range)</h2>
+    <div class="chart-container"><canvas id="rrChart"></canvas></div>
+  </div>
+
   <div class="table-section">
-    <h2>Daily Breakdown (last 8 days)</h2>
+    <h2>Failure Reasons Breakdown (selected range)</h2>
+    <table>
+      <thead>
+        <tr><th>Reason</th><th class="num">Count</th><th class="num">%</th></tr>
+      </thead>
+      <tbody id="failTableBody">
+        <tr><td colspan="3" style="color:var(--muted)">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="table-section">
+    <h2>Daily Breakdown (selected range)</h2>
     <table>
       <thead>
         <tr>
@@ -260,9 +296,9 @@
           <th>Date</th>
           <th class="num">Reaching</th>
           <th class="num">Interdom Assumption</th>
-          <th class="num">Fishy T4</th>
+          <th class="num">Suspect RR-Atlas</th>
           <th class="num">% Interdom Assump</th>
-          <th class="num">% Fishy T4</th>
+          <th class="num">% Suspect RR-Atlas</th>
         </tr>
       </thead>
       <tbody id="hopTableBody">
@@ -284,8 +320,12 @@
 
     let trendChart = null;
     let hopChart = null;
+    let failChart = null;
+    let hopCompChart = null;
+    let rrChart = null;
     let siteMap = null;
     let siteMarkers = null;
+    let currentRange = '7d';
 
     async function fetchJSON(path) {
       const r = await fetch(API_BASE + path);
@@ -313,12 +353,15 @@
 
     async function refresh() {
       try {
-        const [health, api, queries, hq, sitesData] = await Promise.all([
-          fetchJSON('/api/health'),
+        const [health, api, queries, hq, sitesData, failures, hops, rr] = await Promise.all([
+          fetchJSON('/api/health?range=' + currentRange),
           fetchJSON('/api/ping'),
           fetchJSON('/api/queries_today'),
           fetchJSON('/api/hop_quality'),
           fetchJSON('/api/sites'),
+          fetchJSON('/api/failures?range=' + currentRange),
+          fetchJSON('/api/hops?range=' + currentRange),
+          fetchJSON('/api/rr_responsiveness?range=' + currentRange),
         ]);
 
         // API status dot
@@ -375,13 +418,13 @@
         const hqBaseline = hqDays.slice(0, -1);
 
         document.getElementById('fracType12').textContent = pct(hqToday.frac_type12);
-        document.getElementById('fracFishy4').textContent = pct(hqToday.frac_fishy_type4);
+        document.getElementById('fracSuspect').textContent = pct(hqToday.frac_suspect_rr_atlas);
 
         if (hqBaseline.length) {
           const medType12 = median(hqBaseline.map(d => d.frac_type12));
-          const medFishy4 = median(hqBaseline.map(d => d.frac_fishy_type4));
+          const medSuspect = median(hqBaseline.map(d => d.frac_suspect_rr_atlas));
           document.getElementById('fracType12Sub').textContent = `baseline median: ${pct(medType12)}`;
-          document.getElementById('fracFishy4Sub').textContent = `baseline median: ${pct(medFishy4)}`;
+          document.getElementById('fracSuspectSub').textContent = `baseline median: ${pct(medSuspect)}`;
         }
 
         // Trend chart
@@ -462,8 +505,8 @@
                 pointRadius: 4,
               },
               {
-                label: 'Fishy Type 4',
-                data: hqDays.map(d => d.frac_fishy_type4),
+                label: 'Suspect RR-Atlas',
+                data: hqDays.map(d => d.frac_suspect_rr_atlas),
                 borderColor: 'rgba(233, 30, 138, 1)',
                 backgroundColor: 'rgba(233, 30, 138, 0.1)',
                 fill: false,
@@ -488,6 +531,77 @@
           },
         });
 
+        // Failure reasons chart + table
+        const palette = ['#e57373','#ffb74d','#64b5f6','#81c784','#ba68c8','#a1887f','#90a4ae','#f06292','#4db6ac'];
+        const failReasons = Object.keys(failures.totals || {});
+        if (failChart) failChart.destroy();
+        failChart = new Chart(document.getElementById('failChart').getContext('2d'), {
+          type: 'bar',
+          data: {
+            labels: (failures.series || []).map(p => p.day),
+            datasets: failReasons.map((r, i) => ({
+              label: r,
+              data: (failures.series || []).map(p => p.reasons[r] || 0),
+              backgroundColor: palette[i % palette.length],
+            })),
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#888' } } },
+            scales: {
+              x: { stacked: true, ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+              y: { stacked: true, ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+            },
+          },
+        });
+        const failTotal = Object.values(failures.totals || {}).reduce((a, b) => a + b, 0) || 1;
+        document.getElementById('failTableBody').innerHTML = failReasons
+          .sort((a, b) => failures.totals[b] - failures.totals[a])
+          .map(r => `<tr><td>${r}</td><td class="num">${fmt(failures.totals[r])}</td><td class="num">${pct(failures.totals[r] / failTotal)}</td></tr>`)
+          .join('') || '<tr><td colspan="3" style="color:var(--muted)">No failures</td></tr>';
+
+        // Hop composition (measured vs assumed)
+        if (hopCompChart) hopCompChart.destroy();
+        hopCompChart = new Chart(document.getElementById('hopCompChart').getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: (hops.series || []).map(p => p.day),
+            datasets: [
+              { label: 'Measured', data: (hops.series || []).map(p => p.frac_measured), borderColor: '#64b5f6', backgroundColor: 'rgba(100,181,246,0.1)', fill: false, tension: 0.3 },
+              { label: 'Assumed (intradomain)', data: (hops.series || []).map(p => p.frac_intradomain_assumed), borderColor: '#81c784', fill: false, tension: 0.3 },
+              { label: 'Assumed (interdomain)', data: (hops.series || []).map(p => p.frac_interdomain_assumed), borderColor: '#e57373', fill: false, tension: 0.3 },
+            ],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#888' } } },
+            scales: {
+              x: { ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+              y: { min: 0, max: 1, ticks: { color: '#888', callback: v => (v * 100) + '%' }, grid: { color: '#2a2d3a' } },
+            },
+          },
+        });
+
+        // Record-Route responsiveness
+        if (rrChart) rrChart.destroy();
+        rrChart = new Chart(document.getElementById('rrChart').getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: (rr.series || []).map(p => p.day),
+            datasets: [
+              { label: 'RR-responsive fraction', data: (rr.series || []).map(p => p.frac_responsive), borderColor: '#ba68c8', backgroundColor: 'rgba(186,104,200,0.1)', fill: true, tension: 0.3 },
+            ],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#888' } } },
+            scales: {
+              x: { ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+              y: { min: 0, max: 1, ticks: { color: '#888', callback: v => (v * 100) + '%' }, grid: { color: '#2a2d3a' } },
+            },
+          },
+        });
+
         // Health table
         const tbody = document.getElementById('dailyTableBody');
         tbody.innerHTML = days.slice().reverse().map(d => `
@@ -508,9 +622,9 @@
             <td>${d.day}</td>
             <td class="num">${fmt(d.total_reaching)}</td>
             <td class="num">${fmt(d.type12_count)}</td>
-            <td class="num">${fmt(d.fishy_type4_count)}</td>
+            <td class="num">${fmt(d.suspect_rr_atlas_count)}</td>
             <td class="num">${pct(d.frac_type12)}</td>
-            <td class="num">${pct(d.frac_fishy_type4)}</td>
+            <td class="num">${pct(d.frac_suspect_rr_atlas)}</td>
           </tr>
         `).join('');
 
@@ -557,6 +671,15 @@
       const mid = Math.floor(s.length / 2);
       return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
     }
+
+    document.querySelectorAll('.range-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentRange = btn.dataset.range;
+        refresh();
+      });
+    });
 
     refresh();
     setInterval(refresh, 60 * 60 * 1000);
