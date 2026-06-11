@@ -509,6 +509,63 @@ def api_health():
     return jsonify(result)
 
 
+@app.route("/api/failures")
+def api_failures():
+    """Failure-reason breakdown over the selected range."""
+    range_str = request.args.get("range", "7d")
+    start, end = _range_to_window(range_str, date.today())
+    summary = fetch_summary(start, end)
+    series = []
+    totals: dict[str, int] = {}
+    for _, row in summary.iterrows():
+        reasons = {r["reason"]: int(r["cnt"]) for r in (row.get("fail_reasons") or [])}
+        for k, v in reasons.items():
+            totals[k] = totals.get(k, 0) + v
+        series.append({"day": row["day"].isoformat(),
+                       "failed_count": int(row["failed_count"]),
+                       "reasons": reasons})
+    return jsonify({"range": range_str, "series": series, "totals": totals})
+
+
+@app.route("/api/hops")
+def api_hops():
+    """Assumed vs. measured hop fractions over the selected range."""
+    range_str = request.args.get("range", "7d")
+    start, end = _range_to_window(range_str, date.today())
+    summary = fetch_summary(start, end)
+    series = []
+    for _, row in summary.iterrows():
+        total = max(int(row["total_hops"]), 1)
+        series.append({
+            "day": row["day"].isoformat(),
+            "frac_measured": round(int(row["measured_hops"]) / total, 4),
+            "frac_assumed": round(int(row["assumed_hops"]) / total, 4),
+            "frac_intradomain_assumed": round(int(row["intradomain_assumed_hops"]) / total, 4),
+            "frac_interdomain_assumed": round(int(row["interdomain_assumed_hops"]) / total, 4),
+            "suspect_rr_atlas_count": int(row["suspect_rr_atlas_count"]),
+        })
+    return jsonify({"range": range_str, "series": series})
+
+
+@app.route("/api/rr_responsiveness")
+def api_rr_responsiveness():
+    """Record-Route responsiveness (responsive/probed targets) over the range."""
+    range_str = request.args.get("range", "7d")
+    start, end = _range_to_window(range_str, date.today())
+    summary = fetch_summary(start, end)
+    series = []
+    for _, row in summary.iterrows():
+        probed = int(row["rr_probed_targets"])
+        responsive = int(row["rr_responsive_targets"])
+        series.append({
+            "day": row["day"].isoformat(),
+            "probed": probed,
+            "responsive": responsive,
+            "frac_responsive": round(responsive / max(probed, 1), 4),
+        })
+    return jsonify({"range": range_str, "series": series})
+
+
 @app.route("/api/hop_quality")
 def api_hop_quality():
     """Return daily interdomain / type-12 / fishy-type-4 fractions."""
