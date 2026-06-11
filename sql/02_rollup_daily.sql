@@ -35,6 +35,10 @@ USING (
       (SELECT COUNTIF(h.hop_type = 11) FROM UNNEST(r.raw.revtr_hops) h) AS n_intra,
       (SELECT COUNTIF(h.hop_type = 12) FROM UNNEST(r.raw.revtr_hops) h) AS n_inter,
       (SELECT COUNTIF(h.hop_type = 4) FROM UNNEST(r.raw.revtr_hops) h) AS n_type4,
+      (SELECT COUNTIF(h.hop_type = 1) FROM UNNEST(r.raw.revtr_hops) h) AS n_type1,
+      (SELECT COUNTIF(h.hop_type = 3) FROM UNNEST(r.raw.revtr_hops) h) AS n_type3,
+      (SELECT COUNTIF(h.hop_type = 5) FROM UNNEST(r.raw.revtr_hops) h) AS n_type5,
+      (SELECT COUNTIF(h.hop_type = 6) FROM UNNEST(r.raw.revtr_hops) h) AS n_type6,
       EXISTS(
         SELECT 1 FROM UNNEST(r.raw.revtr_hops) h
         WHERE h.hop_type = 12 AND h.asn IS NOT NULL
@@ -82,7 +86,12 @@ USING (
       SUM(IF(is_reach, n_assumed, 0)) AS assumed_hops,
       SUM(IF(is_reach, n_intra, 0)) AS intradomain_assumed_hops,
       SUM(IF(is_reach, n_inter, 0)) AS interdomain_assumed_hops,
-      SUM(IF(is_reach AND is_suspect, n_type4, 0)) AS suspect_rr_atlas_hops
+      SUM(IF(is_reach AND is_suspect, n_type4, 0)) AS suspect_rr_atlas_hops,
+      SUM(IF(is_reach, n_type1, 0)) AS type1_hops,
+      SUM(IF(is_reach, n_type3, 0)) AS type3_hops,
+      SUM(IF(is_reach, n_type4, 0)) AS type4_hops,
+      SUM(IF(is_reach, n_type5, 0)) AS type5_hops,
+      SUM(IF(is_reach, n_type6, 0)) AS type6_hops
     FROM meas_flagged
   ),
   fr AS (
@@ -110,7 +119,8 @@ USING (
     a.suspect_rr_atlas_count, a.total_hops, a.measured_hops, a.assumed_hops,
     a.intradomain_assumed_hops, a.interdomain_assumed_hops, a.suspect_rr_atlas_hops,
     rr.rr_probed_targets, rr.rr_responsive_targets,
-    CURRENT_TIMESTAMP() AS updated_at
+    CURRENT_TIMESTAMP() AS updated_at,
+    a.type1_hops, a.type3_hops, a.type4_hops, a.type5_hops, a.type6_hops
   FROM revtr_agg a CROSS JOIN fr CROSS JOIN rr
 ) S
 ON T.day = S.day
@@ -124,5 +134,7 @@ WHEN MATCHED THEN UPDATE SET
   interdomain_assumed_hops = S.interdomain_assumed_hops,
   suspect_rr_atlas_hops = S.suspect_rr_atlas_hops,
   rr_probed_targets = S.rr_probed_targets, rr_responsive_targets = S.rr_responsive_targets,
-  updated_at = S.updated_at
+  updated_at = S.updated_at,
+  type1_hops = S.type1_hops, type3_hops = S.type3_hops, type4_hops = S.type4_hops,
+  type5_hops = S.type5_hops, type6_hops = S.type6_hops
 WHEN NOT MATCHED THEN INSERT ROW;

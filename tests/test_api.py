@@ -60,15 +60,42 @@ def test_hops_endpoint(client, monkeypatch):
         {"day": date(2026, 6, 10), "total_hops": 100, "measured_hops": 70,
          "assumed_hops": 30, "intradomain_assumed_hops": 18,
          "interdomain_assumed_hops": 12, "suspect_rr_atlas_count": 5,
-         "total_reaching": 90},
+         "total_reaching": 90,
+         "type1_hops": 9, "type3_hops": 20, "type4_hops": 10,
+         "type5_hops": 25, "type6_hops": 15},
     ])
     monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
     resp = client.get("/api/hops?range=7d")
     assert resp.status_code == 200
-    pt = resp.get_json()["series"][0]
+    body = resp.get_json()
+    pt = body["series"][0]
     assert pt["frac_measured"] == 0.7
     assert pt["frac_assumed"] == 0.3
     assert pt["frac_intradomain_assumed"] == 0.18
+    assert pt["frac_interdomain_assumed"] == 0.12
+    # per-type fractions present and correct
+    assert pt["frac_type5"] == 0.25
+    assert pt["frac_type1"] == 0.09
+    # interpretation labels exposed for the chart
+    assert "type5" in body["labels"]
+    assert "Record-Route" in body["labels"]["type5"]
+
+
+def test_hops_endpoint_tolerates_null_pertype(client, monkeypatch):
+    import numpy as np
+    # A day not yet re-rolled: per-type columns are NaN (SQL NULL).
+    df = pd.DataFrame([
+        {"day": date(2026, 6, 10), "total_hops": 100, "measured_hops": 70,
+         "assumed_hops": 30, "intradomain_assumed_hops": 18,
+         "interdomain_assumed_hops": 12, "suspect_rr_atlas_count": 5,
+         "total_reaching": 90,
+         "type1_hops": np.nan, "type3_hops": np.nan, "type4_hops": np.nan,
+         "type5_hops": np.nan, "type6_hops": np.nan},
+    ])
+    monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
+    resp = client.get("/api/hops?range=7d")
+    assert resp.status_code == 200
+    assert resp.get_json()["series"][0]["frac_type5"] == 0.0
 
 
 def test_rr_responsiveness_endpoint(client, monkeypatch):

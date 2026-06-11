@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS `nsf-2148275-66720.revtr_dashboard.daily_summary`
   suspect_rr_atlas_hops INT64,
   rr_probed_targets INT64,
   rr_responsive_targets INT64,
-  updated_at TIMESTAMP
+  updated_at TIMESTAMP,
+  -- per-hop-type counts over reaching measurements (types 11/12 are the
+  -- intradomain/interdomain_assumed columns above)
+  type1_hops INT64,
+  type3_hops INT64,
+  type4_hops INT64,
+  type5_hops INT64,
+  type6_hops INT64
 )
 PARTITION BY day;

@@ -1,6 +1,6 @@
 -- Backfill daily_summary over [start_date, end_date]. Idempotent per day.
--- Edit the two dates below before running. Each day scans ~0.9 GB of
--- revtr1 + ping1, so a 14-day run ≈ 12.5 GB, a year ≈ 330 GB.
+-- GENERATED from 02_rollup_daily.sql (single source of truth for the MERGE).
+-- Edit the two dates below before running. Each day scans ~0.9 GB.
 DECLARE start_date DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY);
 DECLARE end_date   DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY);
 DECLARE target DATE;
@@ -12,14 +12,17 @@ WHILE target <= end_date DO
     WITH gcp_filter AS (
       SELECT NET.IP_FROM_STRING('34.0.0.0') AS lo, NET.IP_FROM_STRING('34.255.255.255') AS hi
     ),
+    -- ---- revtr1 side: per-measurement classification ----
     meas AS (
       SELECT
         r.raw.stop_reason AS stop_reason,
         r.raw.fail_reason AS fail_reason,
+        -- AS path (all hops) / (excluding type-4)
         ARRAY(SELECT CAST(h.asn AS STRING) FROM UNNEST(r.raw.revtr_hops) h
               WHERE h.asn IS NOT NULL ORDER BY h.hop_number) AS as_all,
         ARRAY(SELECT CAST(h.asn AS STRING) FROM UNNEST(r.raw.revtr_hops) h
               WHERE h.asn IS NOT NULL AND h.hop_type != 4 ORDER BY h.hop_number) AS as_no4,
+        -- geographic path key (all hops) / (excluding type-4)
         ARRAY(SELECT CONCAT(CAST(ROUND(h.geolocation_ipinfo.lat,1) AS STRING), ',',
                             CAST(ROUND(h.geolocation_ipinfo.lng,1) AS STRING))
               FROM UNNEST(r.raw.revtr_hops) h
@@ -30,12 +33,17 @@ WHILE target <= end_date DO
               FROM UNNEST(r.raw.revtr_hops) h
               WHERE h.geolocation_ipinfo.lat IS NOT NULL AND h.geolocation_ipinfo.lng IS NOT NULL
                 AND h.hop_type != 4 ORDER BY h.hop_number) AS geo_no4,
+        -- hop-type level counts (this measurement)
         (SELECT COUNT(*) FROM UNNEST(r.raw.revtr_hops) h) AS n_hops,
         (SELECT COUNTIF(h.hop_type IN (3,4,5,6)) FROM UNNEST(r.raw.revtr_hops) h) AS n_measured,
         (SELECT COUNTIF(h.hop_type IN (11,12)) FROM UNNEST(r.raw.revtr_hops) h) AS n_assumed,
         (SELECT COUNTIF(h.hop_type = 11) FROM UNNEST(r.raw.revtr_hops) h) AS n_intra,
         (SELECT COUNTIF(h.hop_type = 12) FROM UNNEST(r.raw.revtr_hops) h) AS n_inter,
         (SELECT COUNTIF(h.hop_type = 4) FROM UNNEST(r.raw.revtr_hops) h) AS n_type4,
+        (SELECT COUNTIF(h.hop_type = 1) FROM UNNEST(r.raw.revtr_hops) h) AS n_type1,
+        (SELECT COUNTIF(h.hop_type = 3) FROM UNNEST(r.raw.revtr_hops) h) AS n_type3,
+        (SELECT COUNTIF(h.hop_type = 5) FROM UNNEST(r.raw.revtr_hops) h) AS n_type5,
+        (SELECT COUNTIF(h.hop_type = 6) FROM UNNEST(r.raw.revtr_hops) h) AS n_type6,
         EXISTS(
           SELECT 1 FROM UNNEST(r.raw.revtr_hops) h
           WHERE h.hop_type = 12 AND h.asn IS NOT NULL
@@ -58,6 +66,7 @@ WHILE target <= end_date DO
       SELECT
         *,
         (stop_reason = 'REACHES') AS is_reach,
+        -- type-4-induced loop: loop exists with all hops AND clears without type-4 hops
         (n_type4 > 0 AND (
            (`nsf-2148275-66720.revtr_dashboard.has_loop`(as_all)
               AND NOT `nsf-2148275-66720.revtr_dashboard.has_loop`(as_no4))
@@ -82,7 +91,12 @@ WHILE target <= end_date DO
         SUM(IF(is_reach, n_assumed, 0)) AS assumed_hops,
         SUM(IF(is_reach, n_intra, 0)) AS intradomain_assumed_hops,
         SUM(IF(is_reach, n_inter, 0)) AS interdomain_assumed_hops,
-        SUM(IF(is_reach AND is_suspect, n_type4, 0)) AS suspect_rr_atlas_hops
+        SUM(IF(is_reach AND is_suspect, n_type4, 0)) AS suspect_rr_atlas_hops,
+        SUM(IF(is_reach, n_type1, 0)) AS type1_hops,
+        SUM(IF(is_reach, n_type3, 0)) AS type3_hops,
+        SUM(IF(is_reach, n_type4, 0)) AS type4_hops,
+        SUM(IF(is_reach, n_type5, 0)) AS type5_hops,
+        SUM(IF(is_reach, n_type6, 0)) AS type6_hops
       FROM meas_flagged
     ),
     fr AS (
@@ -94,6 +108,7 @@ WHILE target <= end_date DO
         GROUP BY fail_reason
       )
     ),
+    -- ---- ping1 side: RR responsiveness (non-spoofed) ----
     rr AS (
       SELECT
         COUNT(DISTINCT p.raw.dst) AS rr_probed_targets,
@@ -109,7 +124,8 @@ WHILE target <= end_date DO
       a.suspect_rr_atlas_count, a.total_hops, a.measured_hops, a.assumed_hops,
       a.intradomain_assumed_hops, a.interdomain_assumed_hops, a.suspect_rr_atlas_hops,
       rr.rr_probed_targets, rr.rr_responsive_targets,
-      CURRENT_TIMESTAMP() AS updated_at
+      CURRENT_TIMESTAMP() AS updated_at,
+      a.type1_hops, a.type3_hops, a.type4_hops, a.type5_hops, a.type6_hops
     FROM revtr_agg a CROSS JOIN fr CROSS JOIN rr
   ) S
   ON T.day = S.day
@@ -123,7 +139,9 @@ WHILE target <= end_date DO
     interdomain_assumed_hops = S.interdomain_assumed_hops,
     suspect_rr_atlas_hops = S.suspect_rr_atlas_hops,
     rr_probed_targets = S.rr_probed_targets, rr_responsive_targets = S.rr_responsive_targets,
-    updated_at = S.updated_at
+    updated_at = S.updated_at,
+    type1_hops = S.type1_hops, type3_hops = S.type3_hops, type4_hops = S.type4_hops,
+    type5_hops = S.type5_hops, type6_hops = S.type6_hops
   WHEN NOT MATCHED THEN INSERT ROW;
 
   SET target = DATE_ADD(target, INTERVAL 1 DAY);

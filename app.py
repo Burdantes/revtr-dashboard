@@ -54,6 +54,28 @@ SUMMARY_TABLE = os.getenv(
     "SUMMARY_TABLE", "nsf-2148275-66720.revtr_dashboard.daily_summary"
 )
 
+# Per-hop-type breakdown for the Hop Composition panel. Maps an API key to its
+# daily_summary column and a human-readable interpretation (from the M-Lab
+# revTr blogpost's hop-type taxonomy).
+HOP_TYPE_COLUMNS = {
+    "type1": "type1_hops",
+    "type3": "type3_hops",
+    "type4": "type4_hops",
+    "type5": "type5_hops",
+    "type6": "type6_hops",
+    "intradomain_assumed": "intradomain_assumed_hops",
+    "interdomain_assumed": "interdomain_assumed_hops",
+}
+HOP_TYPE_LABELS = {
+    "type1": "Destination (type 1)",
+    "type3": "Intersected Traceroute (type 3, measured)",
+    "type4": "Intersected RR-Atlas (type 4, measured)",
+    "type5": "Record-Route (type 5, measured)",
+    "type6": "Spoofed Record-Route (type 6, measured)",
+    "intradomain_assumed": "Assumed Symmetry — Intradomain (type 11)",
+    "interdomain_assumed": "Assumed Symmetry — Interdomain (type 12)",
+}
+
 
 def _range_to_window(range_str: str, today: date) -> tuple[date, date]:
     """Map a range key to an inclusive (start, end=today) date window."""
@@ -120,6 +142,11 @@ def run_query(query: str) -> pd.DataFrame:
     client = get_bq_client()
     job = client.query(query, timeout=BQ_QUERY_RPC_TIMEOUT)
     return job.result(timeout=BQ_RESULT_TIMEOUT).to_dataframe()
+
+
+def _safe_int(v) -> int:
+    """int() that treats SQL NULL (None) and pandas NaN as 0."""
+    return 0 if v is None or (isinstance(v, float) and v != v) else int(v)
 
 
 def fetch_summary(start: date, end: date) -> pd.DataFrame:
@@ -542,15 +569,19 @@ def api_hops():
     series = []
     for _, row in summary.iterrows():
         total = max(int(row["total_hops"]), 1)
-        series.append({
+        point = {
             "day": row["day"].isoformat(),
+            "total_hops": int(row["total_hops"]),
             "frac_measured": round(int(row["measured_hops"]) / total, 4),
             "frac_assumed": round(int(row["assumed_hops"]) / total, 4),
-            "frac_intradomain_assumed": round(int(row["intradomain_assumed_hops"]) / total, 4),
-            "frac_interdomain_assumed": round(int(row["interdomain_assumed_hops"]) / total, 4),
             "suspect_rr_atlas_count": int(row["suspect_rr_atlas_count"]),
-        })
-    return jsonify({"range": range_str, "series": series})
+        }
+        # Per-hop-type fractions (each type's share of all hops that day).
+        # _safe_int tolerates days not yet re-rolled (NULL per-type columns).
+        for key, col in HOP_TYPE_COLUMNS.items():
+            point[f"frac_{key}"] = round(_safe_int(row[col]) / total, 4)
+        series.append(point)
+    return jsonify({"range": range_str, "labels": HOP_TYPE_LABELS, "series": series})
 
 
 @app.route("/api/rr_responsiveness")
