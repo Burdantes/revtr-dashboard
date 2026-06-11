@@ -145,8 +145,9 @@ def run_query(query: str) -> pd.DataFrame:
 
 
 def _safe_int(v) -> int:
-    """int() that treats SQL NULL (None) and pandas NaN as 0."""
-    return 0 if v is None or (isinstance(v, float) and v != v) else int(v)
+    """int() that treats SQL NULL as 0. BigQuery INT64 NULLs arrive as
+    pandas NA (NAType), None, or NaN depending on dtype; pd.isna covers all."""
+    return 0 if v is None or pd.isna(v) else int(v)
 
 
 def fetch_summary(start: date, end: date) -> pd.DataFrame:

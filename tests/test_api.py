@@ -82,16 +82,17 @@ def test_hops_endpoint(client, monkeypatch):
 
 
 def test_hops_endpoint_tolerates_null_pertype(client, monkeypatch):
-    import numpy as np
-    # A day not yet re-rolled: per-type columns are NaN (SQL NULL).
+    # A day not yet re-rolled: per-type columns are SQL NULL. BigQuery's
+    # nullable INT64 dtype surfaces these as pandas NA (NAType), so build the
+    # per-type columns as Int64 with pd.NA to match production exactly.
     df = pd.DataFrame([
         {"day": date(2026, 6, 10), "total_hops": 100, "measured_hops": 70,
          "assumed_hops": 30, "intradomain_assumed_hops": 18,
          "interdomain_assumed_hops": 12, "suspect_rr_atlas_count": 5,
-         "total_reaching": 90,
-         "type1_hops": np.nan, "type3_hops": np.nan, "type4_hops": np.nan,
-         "type5_hops": np.nan, "type6_hops": np.nan},
+         "total_reaching": 90},
     ])
+    for col in ("type1_hops", "type3_hops", "type4_hops", "type5_hops", "type6_hops"):
+        df[col] = pd.array([pd.NA], dtype="Int64")
     monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
     resp = client.get("/api/hops?range=7d")
     assert resp.status_code == 200
