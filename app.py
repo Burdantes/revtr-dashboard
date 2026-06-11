@@ -478,18 +478,25 @@ def api_health():
 
     result = evaluate_health(df, target, hourly_df=hourly_df, hop_df=hop_df)
 
-    # Daily rows for chart/table
+    # Daily series over the selected range, sourced from the rollup table.
+    range_str = request.args.get("range", "7d")
+    start, end = _range_to_window(range_str, target)
+    summary = fetch_summary(start, end)
     daily = []
-    for _, row in df.iterrows():
+    for _, row in summary.iterrows():
+        total = int(row["total_measurements"])
+        reaches = int(row["reaches_count"])
+        failed = int(row["failed_count"])
         daily.append({
             "day": row["day"].isoformat(),
-            "total_measurements": int(row["total_measurements"]),
-            "reaches_count": int(row["reaches_count"]),
-            "failed_count": int(row["failed_count"]),
-            "reach_rate": round(float(row["reach_rate"]), 4),
-            "fail_rate": round(float(row["fail_rate"]), 4),
+            "total_measurements": total,
+            "reaches_count": reaches,
+            "failed_count": failed,
+            "reach_rate": round(reaches / max(total, 1), 4),
+            "fail_rate": round(failed / max(total, 1), 4),
         })
     result["daily"] = daily
+    result["range"] = range_str
     result["current_hour_utc"] = current_hour
 
     # Send alert email (at most once per hour)
