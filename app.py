@@ -46,11 +46,10 @@ REVTR_BASE_URL = os.getenv(
 BQ_PROJECT = os.getenv("BQ_PROJECT", "measurement-lab")
 BASELINE_DAYS = int(os.getenv("REVTR_BASELINE_DAYS", "7"))
 
-# Long-range panels read the pre-aggregated rollup table. Reads of that table
-# bill to the nsf project (SUMMARY_PROJECT); raw revtr_raw scans keep billing to
-# BQ_PROJECT (measurement-lab). See fetch_summary / get_summary_client.
+# Long-range panels read the pre-aggregated rollup table. All queries (raw
+# revtr_raw scans and these summary reads) bill to BQ_PROJECT (measurement-lab);
+# the rollup table lives in nsf and is read cross-project. See fetch_summary.
 RANGE_DAYS = {"7d": 7, "30d": 30, "1y": 365}
-SUMMARY_PROJECT = os.getenv("SUMMARY_PROJECT", "nsf-2148275-66720")
 SUMMARY_TABLE = os.getenv(
     "SUMMARY_TABLE", "nsf-2148275-66720.revtr_dashboard.daily_summary"
 )
@@ -121,6 +120,25 @@ def run_query(query: str) -> pd.DataFrame:
     client = get_bq_client()
     job = client.query(query, timeout=BQ_QUERY_RPC_TIMEOUT)
     return job.result(timeout=BQ_RESULT_TIMEOUT).to_dataframe()
+
+
+def fetch_summary(start: date, end: date) -> pd.DataFrame:
+    """Read per-day rows from daily_summary for an inclusive window.
+
+    The query bills to BQ_PROJECT (measurement-lab) and reads the rollup table
+    cross-project from nsf; the dashboard identity has dataViewer on that dataset.
+    """
+    query = f"""
+    SELECT *
+    FROM `{SUMMARY_TABLE}`
+    WHERE day BETWEEN DATE('{start.isoformat()}') AND DATE('{end.isoformat()}')
+    ORDER BY day
+    """
+    df = run_query(query)
+    if df.empty:
+        return df
+    df["day"] = pd.to_datetime(df["day"]).dt.date
+    return df
 
 
 def fetch_daily_health(target_day: date, baseline_days: int) -> pd.DataFrame:
