@@ -184,7 +184,7 @@ def fetch_queries_today(target_day: date) -> int:
 
 
 def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
-    """Fraction of reaching measurements with interdomain symmetry / fishy type 4."""
+    """Fraction of reaching measurements with interdomain symmetry / suspect RR-atlas hop."""
     start = target_day - timedelta(days=baseline_days)
     end = target_day + timedelta(days=1)
     query = f"""
@@ -217,16 +217,18 @@ def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
               LIMIT 1
             ), h.asn)
         ) AS has_type12,
-        EXISTS(
-          SELECT 1
-          FROM UNNEST(t.raw.revtr_hops) h
-          WHERE h.hop_type = 4
-            AND h.rtt > IFNULL((
-              SELECT MAX(h2.rtt)
-              FROM UNNEST(t.raw.revtr_hops) h2
-              WHERE h2.hop_type != 4 AND h2.rtt IS NOT NULL
-            ), 0) + 50
-        ) AS has_fishy_type4
+        -- Suspect RR-atlas: a type-4 hop creates an AS-path loop that clears
+        -- when type-4 hops are removed. (Live query checks AS-level only; the
+        -- daily_summary rollup additionally checks the geographic path.)
+        (
+          (SELECT COUNTIF(h.hop_type = 4) FROM UNNEST(t.raw.revtr_hops) h) > 0
+          AND `nsf-2148275-66720.revtr_dashboard.has_loop`(
+                ARRAY(SELECT CAST(h.asn AS STRING) FROM UNNEST(t.raw.revtr_hops) h
+                      WHERE h.asn IS NOT NULL ORDER BY h.hop_number))
+          AND NOT `nsf-2148275-66720.revtr_dashboard.has_loop`(
+                ARRAY(SELECT CAST(h.asn AS STRING) FROM UNNEST(t.raw.revtr_hops) h
+                      WHERE h.asn IS NOT NULL AND h.hop_type != 4 ORDER BY h.hop_number))
+        ) AS has_suspect_rr_atlas
       FROM `measurement-lab.revtr_raw.revtr1` t
       WHERE t.date >= DATE('{start.isoformat()}')
         AND t.date < DATE('{end.isoformat()}')
@@ -239,7 +241,7 @@ def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
       COUNT(*) AS total_reaching,
       COUNTIF(has_interdomain) AS interdomain_count,
       COUNTIF(has_type12) AS type12_count,
-      COUNTIF(has_fishy_type4) AS fishy_type4_count
+      COUNTIF(has_suspect_rr_atlas) AS suspect_rr_atlas_count
     FROM per_measurement
     GROUP BY day
     ORDER BY day
@@ -250,7 +252,7 @@ def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
     df["day"] = pd.to_datetime(df["day"]).dt.date
     df["frac_interdomain"] = df["interdomain_count"] / df["total_reaching"].clip(lower=1)
     df["frac_type12"] = df["type12_count"] / df["total_reaching"].clip(lower=1)
-    df["frac_fishy_type4"] = df["fishy_type4_count"] / df["total_reaching"].clip(lower=1)
+    df["frac_suspect_rr_atlas"] = df["suspect_rr_atlas_count"] / df["total_reaching"].clip(lower=1)
     return df
 
 
@@ -568,7 +570,7 @@ def api_rr_responsiveness():
 
 @app.route("/api/hop_quality")
 def api_hop_quality():
-    """Return daily interdomain / type-12 / fishy-type-4 fractions."""
+    """Return daily interdomain / type-12 / suspect RR-atlas fractions."""
     target = date.today()
     df = fetch_hop_quality(target, BASELINE_DAYS)
     daily = []
@@ -578,10 +580,10 @@ def api_hop_quality():
             "total_reaching": int(row["total_reaching"]),
             "interdomain_count": int(row["interdomain_count"]),
             "type12_count": int(row["type12_count"]),
-            "fishy_type4_count": int(row["fishy_type4_count"]),
+            "suspect_rr_atlas_count": int(row["suspect_rr_atlas_count"]),
             "frac_interdomain": round(float(row["frac_interdomain"]), 4),
             "frac_type12": round(float(row["frac_type12"]), 4),
-            "frac_fishy_type4": round(float(row["frac_fishy_type4"]), 4),
+            "frac_suspect_rr_atlas": round(float(row["frac_suspect_rr_atlas"]), 4),
         })
     return jsonify({"daily": daily})
 

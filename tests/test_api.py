@@ -75,3 +75,18 @@ def test_rr_responsiveness_endpoint(client, monkeypatch):
     pt = resp.get_json()["series"][0]
     assert pt["frac_responsive"] == 0.25
     assert pt["probed"] == 200
+
+
+def test_hop_quality_uses_renamed_keys(client, monkeypatch):
+    df = pd.DataFrame([
+        {"day": date(2026, 6, 10), "total_reaching": 100, "interdomain_count": 10,
+         "type12_count": 8, "suspect_rr_atlas_count": 5,
+         "frac_interdomain": 0.1, "frac_type12": 0.08, "frac_suspect_rr_atlas": 0.05},
+    ])
+    monkeypatch.setattr(appmod, "fetch_hop_quality", lambda d, b: df)
+    resp = client.get("/api/hop_quality")
+    assert resp.status_code == 200
+    row0 = resp.get_json()["daily"][0]
+    assert "frac_suspect_rr_atlas" in row0
+    assert "frac_fishy_type4" not in row0
+    assert row0["suspect_rr_atlas_count"] == 5
