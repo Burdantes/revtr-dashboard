@@ -68,12 +68,12 @@ HOP_TYPE_COLUMNS = {
 }
 HOP_TYPE_LABELS = {
     "type1": "Destination (type 1)",
-    "type3": "Intersected Traceroute (type 3, measured)",
-    "type4": "Intersected RR-Atlas (type 4, measured)",
-    "type5": "Record-Route (type 5, measured)",
-    "type6": "Spoofed Record-Route (type 6, measured)",
-    "intradomain_assumed": "Assumed Symmetry — Intradomain (type 11)",
-    "interdomain_assumed": "Assumed Symmetry — Interdomain (type 12)",
+    "type3": "Intersected Traceroute (type 3)",
+    "type4": "Intersected RR-Atlas (type 4)",
+    "type5": "Record-Route (type 5)",
+    "type6": "Spoofed Record-Route (type 6)",
+    "intradomain_assumed": "Intradomain (type 11)",
+    "interdomain_assumed": "Interdomain (type 12)",
 }
 
 
@@ -83,6 +83,66 @@ def _range_to_window(range_str: str, today: date) -> tuple[date, date]:
         return date(2000, 1, 1), today
     days = RANGE_DAYS.get(range_str, 7)
     return today - timedelta(days=days - 1), today
+
+
+def _granularity_for_range(range_str: str) -> str:
+    """Time bucket for a range so long-range charts stay readable.
+
+    7d/30d -> daily; 1y -> weekly; all -> monthly.
+    """
+    if range_str == "1y":
+        return "week"
+    if range_str == "all":
+        return "month"
+    return "day"
+
+
+def _bucket_label(d: date, gran: str) -> str:
+    """Bucket key/label for a day at the given granularity.
+
+    week -> the Monday of that week (ISO date); month -> ``YYYY-MM``; day -> ISO date.
+    Chronological string sort matches chronological order in every case.
+    """
+    if gran == "week":
+        return (d - timedelta(days=d.weekday())).isoformat()
+    if gran == "month":
+        return f"{d.year:04d}-{d.month:02d}"
+    return d.isoformat()
+
+
+def _bucket_sums(summary: pd.DataFrame, gran: str, cols: list[str]) -> list[tuple[str, dict[str, int]]]:
+    """Aggregate daily summary rows into time buckets, summing ``cols``.
+
+    Returns an ordered (chronological) list of ``(bucket_label, {col: sum})``.
+    Fractions must be recomputed by the caller from the summed numerators/denominators
+    (averaging per-day fractions would ignore per-day volume).
+    """
+    buckets: dict[str, dict[str, int]] = {}
+    order: list[str] = []
+    for _, row in summary.iterrows():
+        label = _bucket_label(row["day"], gran)
+        if label not in buckets:
+            buckets[label] = {c: 0 for c in cols}
+            order.append(label)
+        for c in cols:
+            buckets[label][c] += _safe_int(row[c])
+    return [(lbl, buckets[lbl]) for lbl in order]
+
+
+# Raw revtr fail_reason strings collapse into a handful of primary failure modes.
+# Order matters: check the most specific / dominant tokens first.
+def _categorize_failure(reason: str) -> str:
+    """Bucket a raw revtr ``fail_reason`` string into a primary failure category."""
+    r = (reason or "").lower()
+    if "gaplimit" in r:
+        return "Gap limit reached"
+    if "timed out" in r or "timeout" in r:
+        return "Timed out"
+    if "unreach" in r:
+        return "Unreachable"
+    if "loop" in r:
+        return "Routing loop"
+    return "Probe/system error"
 
 # Alert thresholds (same defaults as revtr_health_alert.py)
 VOLUME_DROP_RATIO = 0.5
@@ -512,13 +572,16 @@ def api_health():
     range_str = request.args.get("range", "7d")
     start, end = _range_to_window(range_str, target)
     summary = fetch_summary(start, end)
+    gran = _granularity_for_range(range_str)
     daily = []
-    for _, row in summary.iterrows():
-        total = int(row["total_measurements"])
-        reaches = int(row["reaches_count"])
-        failed = int(row["failed_count"])
+    for label, s in _bucket_sums(
+        summary, gran, ["total_measurements", "reaches_count", "failed_count"]
+    ):
+        total = s["total_measurements"]
+        reaches = s["reaches_count"]
+        failed = s["failed_count"]
         daily.append({
-            "day": row["day"].isoformat(),
+            "day": label,
             "total_measurements": total,
             "reaches_count": reaches,
             "failed_count": failed,
@@ -527,6 +590,7 @@ def api_health():
         })
     result["daily"] = daily
     result["range"] = range_str
+    result["granularity"] = gran
     result["current_hour_utc"] = current_hour
 
     # Send alert email (at most once per hour)
@@ -541,67 +605,85 @@ def api_health():
 
 @app.route("/api/failures")
 def api_failures():
-    """Failure-reason breakdown over the selected range."""
+    """Failure-reason breakdown over the range, bucketed into primary categories."""
     range_str = request.args.get("range", "7d")
     start, end = _range_to_window(range_str, date.today())
+    gran = _granularity_for_range(range_str)
     summary = fetch_summary(start, end)
-    series = []
+    buckets: dict[str, dict] = {}
+    order: list[str] = []
     totals: dict[str, int] = {}
     for _, row in summary.iterrows():
+        label = _bucket_label(row["day"], gran)
+        if label not in buckets:
+            buckets[label] = {"failed_count": 0, "reasons": {}}
+            order.append(label)
+        b = buckets[label]
+        b["failed_count"] += int(row["failed_count"])
         # fail_reasons is a numpy.ndarray of dicts (or None/NaN on zero-failure
         # days). Avoid `arr or []` — an ndarray's truth value is ambiguous.
         fr = row["fail_reasons"]
         items = [] if fr is None or isinstance(fr, float) else list(fr)
-        reasons = {r["reason"]: int(r["cnt"]) for r in items}
-        for k, v in reasons.items():
-            totals[k] = totals.get(k, 0) + v
-        series.append({"day": row["day"].isoformat(),
-                       "failed_count": int(row["failed_count"]),
-                       "reasons": reasons})
-    return jsonify({"range": range_str, "series": series, "totals": totals})
+        for it in items:
+            cat = _categorize_failure(it["reason"])
+            cnt = int(it["cnt"])
+            b["reasons"][cat] = b["reasons"].get(cat, 0) + cnt
+            totals[cat] = totals.get(cat, 0) + cnt
+    series = [{"day": lbl, "failed_count": buckets[lbl]["failed_count"],
+               "reasons": buckets[lbl]["reasons"]} for lbl in order]
+    return jsonify({"range": range_str, "granularity": gran, "series": series, "totals": totals})
 
 
 @app.route("/api/hops")
 def api_hops():
-    """Assumed vs. measured hop fractions over the selected range."""
+    """Per-hop-type composition fractions over the selected range (bucketed)."""
     range_str = request.args.get("range", "7d")
     start, end = _range_to_window(range_str, date.today())
+    gran = _granularity_for_range(range_str)
     summary = fetch_summary(start, end)
+    cols = ["total_hops", "measured_hops", "assumed_hops", "suspect_rr_atlas_count",
+            *HOP_TYPE_COLUMNS.values()]
     series = []
-    for _, row in summary.iterrows():
-        total = max(int(row["total_hops"]), 1)
+    for label, s in _bucket_sums(summary, gran, cols):
+        total = max(s["total_hops"], 1)
         point = {
-            "day": row["day"].isoformat(),
-            "total_hops": int(row["total_hops"]),
-            "frac_measured": round(int(row["measured_hops"]) / total, 4),
-            "frac_assumed": round(int(row["assumed_hops"]) / total, 4),
-            "suspect_rr_atlas_count": int(row["suspect_rr_atlas_count"]),
+            "day": label,
+            "total_hops": s["total_hops"],
+            "frac_measured": round(s["measured_hops"] / total, 4),
+            "frac_assumed": round(s["assumed_hops"] / total, 4),
+            "suspect_rr_atlas_count": s["suspect_rr_atlas_count"],
         }
-        # Per-hop-type fractions (each type's share of all hops that day).
-        # _safe_int tolerates days not yet re-rolled (NULL per-type columns).
+        # Per-hop-type fractions (each type's share of all hops in the bucket).
         for key, col in HOP_TYPE_COLUMNS.items():
-            point[f"frac_{key}"] = round(_safe_int(row[col]) / total, 4)
+            point[f"frac_{key}"] = round(s[col] / total, 4)
+        # Remainder so a stacked composition sums to 100% (hops not in any of the
+        # classified type columns — e.g. unresponsive/unclassified hops).
+        typed = sum(point[f"frac_{k}"] for k in HOP_TYPE_COLUMNS)
+        point["frac_other"] = round(max(0.0, 1.0 - typed), 4)
         series.append(point)
-    return jsonify({"range": range_str, "labels": HOP_TYPE_LABELS, "series": series})
+    labels = {**HOP_TYPE_LABELS, "other": "Other / unclassified"}
+    return jsonify({"range": range_str, "granularity": gran,
+                    "labels": labels, "series": series})
 
 
 @app.route("/api/rr_responsiveness")
 def api_rr_responsiveness():
-    """Record-Route responsiveness (responsive/probed targets) over the range."""
+    """Record-Route responsiveness (responsive/probed targets) over the range (bucketed)."""
     range_str = request.args.get("range", "7d")
     start, end = _range_to_window(range_str, date.today())
+    gran = _granularity_for_range(range_str)
     summary = fetch_summary(start, end)
     series = []
-    for _, row in summary.iterrows():
-        probed = int(row["rr_probed_targets"])
-        responsive = int(row["rr_responsive_targets"])
+    for label, s in _bucket_sums(summary, gran, ["rr_probed_targets", "rr_responsive_targets"]):
+        probed = s["rr_probed_targets"]
+        responsive = s["rr_responsive_targets"]
         series.append({
-            "day": row["day"].isoformat(),
+            "day": label,
             "probed": probed,
             "responsive": responsive,
             "frac_responsive": round(responsive / max(probed, 1), 4),
         })
-    return jsonify({"range": range_str, "series": series})
+    return jsonify({"range": range_str, "granularity": gran, "series": series})
 
 
 @app.route("/api/hop_quality")

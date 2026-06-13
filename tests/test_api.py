@@ -38,20 +38,27 @@ def test_failures_endpoint(client, monkeypatch):
     import numpy as np
     # Mirror real BigQuery output: repeated struct -> numpy.ndarray of dicts,
     # and a zero-failure day -> NULL array (None/NaN).
+    # Raw revtr reason strings get bucketed into primary categories:
+    # GAPLIMIT->"Gap limit reached", timed out->"Timed out", anything else
+    # (e.g. no-socket)->"Probe/system error".
     df = pd.DataFrame([
         {"day": date(2026, 6, 9), "failed_count": 0, "fail_reasons": None},
         {"day": date(2026, 6, 10), "failed_count": 30,
-         "fail_reasons": np.array([{"reason": "NO_RESP", "cnt": 20},
-                                   {"reason": "TIMEOUT", "cnt": 10}], dtype=object)},
+         "fail_reasons": np.array([
+             {"reason": "Traceroute didn't reach destination  GAPLIMIT", "cnt": 20},
+             {"reason": "Traceroute timed out ", "cnt": 7},
+             {"reason": " No socket found ", "cnt": 3}], dtype=object)},
     ])
     monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
     resp = client.get("/api/failures?range=7d")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["totals"]["NO_RESP"] == 20
-    assert data["totals"]["TIMEOUT"] == 10
+    assert data["totals"]["Gap limit reached"] == 20
+    assert data["totals"]["Timed out"] == 7
+    assert data["totals"]["Probe/system error"] == 3
+    assert data["granularity"] == "day"
     assert data["series"][-1]["day"] == "2026-06-10"
-    assert data["series"][-1]["reasons"]["NO_RESP"] == 20
+    assert data["series"][-1]["reasons"]["Gap limit reached"] == 20
     assert data["series"][0]["reasons"] == {}  # zero-failure day
 
 
@@ -124,3 +131,35 @@ def test_hop_quality_uses_renamed_keys(client, monkeypatch):
     assert "frac_suspect_rr_atlas" in row0
     assert "frac_fishy_type4" not in row0
     assert row0["suspect_rr_atlas_count"] == 5
+
+
+def test_categorize_failure_buckets():
+    # Real revtr reason strings collapse into 5 primary categories.
+    cat = appmod._categorize_failure
+    assert cat("Traceroute didn't reach destination  GAPLIMIT") == "Gap limit reached"
+    assert cat("Traceroute didn't reach destination  GAPLIMIT. Could not find "
+               "responsive addresses in the destination AS") == "Gap limit reached"
+    assert cat(" Traceroute timed out ") == "Timed out"
+    assert cat("Traceroute didn't reach destination  UNREACH") == "Unreachable"
+    assert cat("Traceroute didn't reach destination  LOOP") == "Routing loop"
+    assert cat(" No socket found ") == "Probe/system error"
+    assert cat("rpc error: code = Unavailable") == "Probe/system error"
+
+
+def test_failures_weekly_granularity(client, monkeypatch):
+    import numpy as np
+    # Daily rows spanning two ISO weeks; range=1y -> weekly buckets.
+    fr = np.array([{"reason": "Traceroute timed out ", "cnt": 5}], dtype=object)
+    df = pd.DataFrame([
+        {"day": date(2026, 6, 2), "failed_count": 5, "fail_reasons": fr},
+        {"day": date(2026, 6, 3), "failed_count": 5, "fail_reasons": fr},
+        {"day": date(2026, 6, 16), "failed_count": 5, "fail_reasons": fr},
+    ])
+    monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
+    data = client.get("/api/failures?range=1y").get_json()
+    assert data["granularity"] == "week"
+    # Two distinct weeks -> two buckets; the first week summed two days (10).
+    assert len(data["series"]) == 2
+    assert data["series"][0]["failed_count"] == 10
+    assert data["series"][0]["reasons"]["Timed out"] == 10
+    assert data["totals"]["Timed out"] == 15  # 5+5+5 across both weeks
