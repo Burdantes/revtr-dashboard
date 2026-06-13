@@ -163,3 +163,22 @@ def test_failures_weekly_granularity(client, monkeypatch):
     assert data["series"][0]["failed_count"] == 10
     assert data["series"][0]["reasons"]["Timed out"] == 10
     assert data["totals"]["Timed out"] == 15  # 5+5+5 across both weeks
+
+
+def test_hops_skips_no_data_periods(client, monkeypatch):
+    # A revtr-down day (total_hops 0/NULL) must be omitted, not shown as 100% "Other".
+    df = pd.DataFrame([
+        {"day": date(2026, 6, 9), "total_hops": 0, "measured_hops": 0, "assumed_hops": 0,
+         "intradomain_assumed_hops": 0, "interdomain_assumed_hops": 0,
+         "suspect_rr_atlas_count": 0, "total_reaching": 0,
+         "type1_hops": 0, "type3_hops": 0, "type4_hops": 0, "type5_hops": 0, "type6_hops": 0},
+        {"day": date(2026, 6, 10), "total_hops": 100, "measured_hops": 70, "assumed_hops": 30,
+         "intradomain_assumed_hops": 18, "interdomain_assumed_hops": 12,
+         "suspect_rr_atlas_count": 5, "total_reaching": 90,
+         "type1_hops": 10, "type3_hops": 20, "type4_hops": 10, "type5_hops": 25, "type6_hops": 15},
+    ])
+    monkeypatch.setattr(appmod, "fetch_summary", lambda s, e: df)
+    body = client.get("/api/hops?range=7d").get_json()
+    days = [p["day"] for p in body["series"]]
+    assert "2026-06-09" not in days   # no-data day omitted
+    assert "2026-06-10" in days

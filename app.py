@@ -645,7 +645,11 @@ def api_hops():
             *HOP_TYPE_COLUMNS.values()]
     series = []
     for label, s in _bucket_sums(summary, gran, cols):
-        total = max(s["total_hops"], 1)
+        # Skip periods with no hop data (e.g. a revtr outage gap, or days whose
+        # raw data has aged out) — otherwise total=0 renders as 100% "Other".
+        if s["total_hops"] <= 0:
+            continue
+        total = s["total_hops"]
         point = {
             "day": label,
             "total_hops": s["total_hops"],
