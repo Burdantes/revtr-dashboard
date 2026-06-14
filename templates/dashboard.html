@@ -314,6 +314,7 @@
     <h2 style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       Tests per Destination AS &mdash; by day (last 7 days)
       <button id="asDistBtn" class="range-btn">Load</button>
+      <select id="asDistDay" class="range-btn" style="display:none;"></select>
       <span id="asDistMeta" class="meta"></span>
     </h2>
     <table>
@@ -733,7 +734,9 @@
         return;
       }
       const c = asDistSort.col, dir = asDistSort.dir;
-      const rows = asDistRows.slice().sort((a, b) => {
+      const selDay = (document.getElementById('asDistDay').value) || 'all';
+      const filtered = selDay === 'all' ? asDistRows : asDistRows.filter(r => r.day === selDay);
+      const rows = filtered.slice().sort((a, b) => {
         const x = a[c], y = b[c];
         if (typeof x === 'number' && typeof y === 'number') return (x - y) * dir;
         return String(x).localeCompare(String(y)) * dir;
@@ -769,6 +772,15 @@
       try {
         const d = await fetchJSON('/api/as_distribution');
         asDistRows = d.rows || [];
+        // Populate the day picker (distinct days, newest first); default to the
+        // latest day so we show one day at a time, with an "All days" option.
+        const sel = document.getElementById('asDistDay');
+        const uniqueDays = [...new Set(asDistRows.map(r => r.day))].sort().reverse();
+        const prev = sel.value;
+        sel.innerHTML = '<option value="all">All days</option>' +
+          uniqueDays.map(dy => `<option value="${dy}">${dy}</option>`).join('');
+        sel.value = (prev && [...sel.options].some(o => o.value === prev)) ? prev : (uniqueDays[0] || 'all');
+        sel.style.display = uniqueDays.length ? '' : 'none';
         renderAsDist();
         if (d.error) {
           meta.textContent = d.error;
@@ -787,6 +799,7 @@
     }
 
     document.getElementById('asDistBtn').addEventListener('click', loadAsDist);
+    document.getElementById('asDistDay').addEventListener('change', renderAsDist);
     document.querySelectorAll('th.sortable').forEach(th => {
       th.addEventListener('click', () => {
         const col = th.dataset.sort;
