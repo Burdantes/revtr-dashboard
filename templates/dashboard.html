@@ -320,7 +320,9 @@
       <thead>
         <tr>
           <th>Dest AS</th>
+          <th>AS Name</th>
           <th class="num sortable" data-sort="tests">Tests</th>
+          <th class="num sortable" data-sort="unique_ips">Unique IPs</th>
           <th class="num sortable" data-sort="frac_reached">% Reached</th>
           <th class="num sortable" data-sort="reaches">Reaches</th>
           <th class="num sortable" data-sort="interdomain_count">Interdom Assump</th>
@@ -328,9 +330,14 @@
         </tr>
       </thead>
       <tbody id="asDistBody">
-        <tr><td colspan="6" style="color:var(--muted)">Click &ldquo;Load&rdquo; to run the on-demand 7-day per-AS query (~2.4&nbsp;GiB scan, cached 1h). Destination AS resolved by longest-prefix match against hopannotation2.</td></tr>
+        <tr><td colspan="8" style="color:var(--muted)">Click &ldquo;Load&rdquo; to run the on-demand 7-day per-AS query (~2.85&nbsp;GiB scan, cached 1h). Destination AS &amp; name resolved by longest-prefix match against hopannotation2.</td></tr>
       </tbody>
     </table>
+    <p class="meta" style="margin-top:10px;">
+      The <strong style="color:var(--amber)">GCP&nbsp;(34.0.0.0/8)</strong> row is shown here for completeness but is
+      <strong>excluded from every other panel</strong> on this dashboard. <strong style="color:var(--muted)">unmapped</strong> =
+      destination IPs not covered by any hopannotation2 prefix (~19% of tests). Window: last 7 days.
+    </p>
   </div>
 
   <footer>
@@ -725,13 +732,17 @@
       }
       const c = asDistSort.col, dir = asDistSort.dir;
       const rows = asDistRows.slice().sort((a, b) => (a[c] - b[c]) * dir);
+      const esc = s => (s == null ? '' : String(s).replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])));
       tb.innerHTML = rows.map(r => {
-        const as = r.asn === 'unmapped'
-          ? '<span style="color:var(--muted)">unmapped</span>'
-          : 'AS' + r.asn;
+        let as;
+        if (r.is_gcp) as = '<span style="color:var(--amber)">GCP 34/8</span>';
+        else if (r.asn === 'unmapped') as = '<span style="color:var(--muted)">unmapped</span>';
+        else as = 'AS' + r.asn;
         return `<tr>
           <td>${as}</td>
+          <td style="color:var(--muted)">${esc(r.as_name)}</td>
           <td class="num">${fmt(r.tests)}</td>
+          <td class="num">${fmt(r.unique_ips)}</td>
           <td class="num">${pct(r.frac_reached)}</td>
           <td class="num">${fmt(r.reaches)}</td>
           <td class="num">${fmt(r.interdomain_count)}</td>

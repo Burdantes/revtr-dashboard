@@ -171,17 +171,25 @@ def test_as_distribution_endpoint(client, monkeypatch):
     # frac_reached (reaches/tests) and frac_interdomain (interdomain/reaching).
     appmod._as_dist_cache.clear()  # endpoint caches per window; keep test hermetic
     df = pd.DataFrame([
-        {"asn": "7018", "tests": 1000, "reaches": 100, "interdomain_count": 50},
-        {"asn": "unmapped", "tests": 200, "reaches": 80, "interdomain_count": 10},
+        {"asn": "7018", "as_name": "AT&T", "is_gcp": False, "unique_ips": 42,
+         "tests": 1000, "reaches": 100, "interdomain_count": 50},
+        {"asn": "gcp", "as_name": "GCP clients (34.0.0.0/8)", "is_gcp": True,
+         "unique_ips": 7, "tests": 500, "reaches": 480, "interdomain_count": 20},
+        {"asn": "unmapped", "as_name": None, "is_gcp": False, "unique_ips": 9,
+         "tests": 200, "reaches": 80, "interdomain_count": 10},
     ])
     monkeypatch.setattr(appmod, "fetch_as_test_distribution", lambda s, e, lim: df)
     data = client.get("/api/as_distribution").get_json()
-    assert data["row_count"] == 2
+    assert data["row_count"] == 3
     assert data["window"]["days"] == 7
     assert data["cached"] is False
     rows = {r["asn"]: r for r in data["rows"]}
+    assert rows["7018"]["as_name"] == "AT&T"
+    assert rows["7018"]["unique_ips"] == 42
     assert rows["7018"]["frac_reached"] == 0.1           # 100 / 1000
     assert rows["7018"]["frac_interdomain"] == 0.5       # 50 / 100 reaching
+    assert rows["gcp"]["is_gcp"] is True                 # GCP shown as its own row
+    assert rows["unmapped"]["as_name"] is None           # NULL ASName -> null
     assert rows["unmapped"]["frac_reached"] == 0.4       # 80 / 200
 
 
@@ -193,7 +201,9 @@ def test_as_distribution_caches(client, monkeypatch):
 
     def _fake(s, e, lim):
         calls["n"] += 1
-        return pd.DataFrame([{"asn": "1", "tests": 10, "reaches": 5, "interdomain_count": 2}])
+        return pd.DataFrame([{"asn": "1", "as_name": "Example", "is_gcp": False,
+                              "unique_ips": 3, "tests": 10, "reaches": 5,
+                              "interdomain_count": 2}])
 
     monkeypatch.setattr(appmod, "fetch_as_test_distribution", _fake)
     first = client.get("/api/as_distribution").get_json()

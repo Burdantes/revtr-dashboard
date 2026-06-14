@@ -353,10 +353,10 @@ def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
 
 
 def fetch_as_test_distribution(start: date, end: date, limit: int) -> pd.DataFrame:
-    """Per-destination-AS test counts / reach / interdomain over ``[start, end)``.
+    """Per-destination-AS test counts / unique IPs / reach / interdomain over ``[start, end)``.
 
-    The destination AS is resolved by longest-prefix-matching ``raw.dst`` against
-    an IPv4 prefix->AS table built from the same window of
+    The destination AS (and its ``ASName``) is resolved by longest-prefix-matching
+    ``raw.dst`` against an IPv4 prefix->AS table built from the same window of
     ``measurement-lab.ndt_raw.hopannotation2`` (RouteViews ``Network`` annotations).
     Deriving the AS from the type-1 destination hop instead would only cover
     *reaching* measurements (failures have no destination hop), forcing the reach
@@ -365,7 +365,14 @@ def fetch_as_test_distribution(start: date, end: date, limit: int) -> pd.DataFra
     prefix aggregate into a single ``"unmapped"`` row (~19% of tests in practice —
     revtr targets that never appear in an NDT path).
 
-    Heavy live scan (~2.4 GiB), so callers cache it and run it on demand only.
+    Unlike every other panel, this query does NOT exclude the GCP-client range
+    (``34.0.0.0/8``); those destinations are aggregated into a single ``"gcp"``
+    row (``is_gcp = TRUE``) so the volume is visible. That row is the only place
+    on the dashboard GCP-range destinations are counted — every other metric
+    excludes them.
+
+    ``unique_ips`` is the number of distinct destination IPs per AS. Heavy live
+    scan (~2.85 GiB), so callers cache it and run it on demand only.
     """
     prefix_end = end - timedelta(days=1)  # inclusive last day of the window
     query = r"""
@@ -374,20 +381,23 @@ def fetch_as_test_distribution(start: date, end: date, limit: int) -> pd.DataFra
       SELECT DISTINCT
         NET.IP_FROM_STRING(REGEXP_EXTRACT(raw.Annotations.Network.CIDR, r'^(.*)/')) AS net_bin,
         CAST(REGEXP_EXTRACT(raw.Annotations.Network.CIDR, r'/(\d+)$') AS INT64) AS mask,
-        raw.Annotations.Network.ASNumber AS asn
+        raw.Annotations.Network.ASNumber AS asn,
+        raw.Annotations.Network.ASName AS asname
       FROM `measurement-lab.ndt_raw.hopannotation2`
       WHERE date BETWEEN DATE('{prefix_start}') AND DATE('{prefix_end}')
         AND raw.Annotations.Network.CIDR IS NOT NULL
         AND raw.Annotations.Network.ASNumber IS NOT NULL
     ),
     prefix_ip4 AS (
-      SELECT net_bin, mask, asn FROM prefix4
+      SELECT net_bin, mask, asn, asname FROM prefix4
       WHERE mask BETWEEN 1 AND 32 AND BYTE_LENGTH(net_bin) = 4
     ),
     masks AS (SELECT DISTINCT mask FROM prefix_ip4),
     per_dst AS (
       SELECT t.raw.dst AS dst,
-        ANY_VALUE(NET.IP_FROM_STRING(t.raw.dst)) AS dst_bin,
+        NET.IP_FROM_STRING(t.raw.dst) AS dst_bin,
+        (NET.IP_FROM_STRING(t.raw.dst) BETWEEN NET.IP_FROM_STRING('34.0.0.0')
+           AND NET.IP_FROM_STRING('34.255.255.255')) AS is_gcp,
         COUNT(*) AS tests,
         COUNTIF(t.raw.stop_reason = 'REACHES') AS reaches,
         COUNTIF(t.raw.stop_reason = 'REACHES' AND EXISTS(
@@ -398,23 +408,33 @@ def fetch_as_test_distribution(start: date, end: date, limit: int) -> pd.DataFra
                   ORDER BY h2.hop_number DESC LIMIT 1), h.asn))) AS interdomain
       FROM `measurement-lab.revtr_raw.revtr1` t
       WHERE t.date >= DATE('{start}') AND t.date < DATE('{end}')
-        AND NOT (NET.IP_FROM_STRING(t.raw.dst) BETWEEN
-                 NET.IP_FROM_STRING('34.0.0.0') AND NET.IP_FROM_STRING('34.255.255.255'))
-      GROUP BY dst
+      GROUP BY t.raw.dst
     ),
     dst_asn AS (
-      SELECT dst, asn FROM (
-        SELECT d.dst, p.asn,
+      SELECT dst, asn, asname FROM (
+        SELECT d.dst, p.asn, p.asname,
           ROW_NUMBER() OVER (PARTITION BY d.dst ORDER BY p.mask DESC) AS rn
         FROM per_dst d
         JOIN masks k ON BYTE_LENGTH(d.dst_bin) = 4
         JOIN prefix_ip4 p ON p.mask = k.mask AND p.net_bin = NET.IP_TRUNC(d.dst_bin, k.mask)
+        WHERE NOT d.is_gcp
       ) WHERE rn = 1
+    ),
+    labeled AS (
+      SELECT
+        CASE WHEN d.is_gcp THEN 'gcp'
+             ELSE COALESCE(CAST(da.asn AS STRING), 'unmapped') END AS asn,
+        CASE WHEN d.is_gcp THEN 'GCP clients (34.0.0.0/8)' ELSE da.asname END AS as_name,
+        d.is_gcp, d.dst, d.tests, d.reaches, d.interdomain
+      FROM per_dst d LEFT JOIN dst_asn da USING(dst)
     )
-    SELECT COALESCE(CAST(da.asn AS STRING), 'unmapped') AS asn,
-      SUM(d.tests) AS tests, SUM(d.reaches) AS reaches,
-      SUM(d.interdomain) AS interdomain_count
-    FROM per_dst d LEFT JOIN dst_asn da USING(dst)
+    SELECT asn,
+      ANY_VALUE(as_name) AS as_name,
+      LOGICAL_OR(is_gcp) AS is_gcp,
+      COUNT(*) AS unique_ips,
+      SUM(tests) AS tests, SUM(reaches) AS reaches,
+      SUM(interdomain) AS interdomain_count
+    FROM labeled
     GROUP BY asn ORDER BY tests DESC LIMIT {limit}
     """.format(
         start=start.isoformat(), end=end.isoformat(),
@@ -820,8 +840,12 @@ def api_as_distribution():
         tests = _safe_int(r["tests"])
         reaches = _safe_int(r["reaches"])
         inter = _safe_int(r["interdomain_count"])
+        name = r["as_name"]
         rows.append({
             "asn": r["asn"],
+            "as_name": None if name is None or (isinstance(name, float) and pd.isna(name)) else str(name),
+            "is_gcp": bool(r["is_gcp"]),
+            "unique_ips": _safe_int(r["unique_ips"]),
             "tests": tests,
             "reaches": reaches,
             "frac_reached": round(reaches / max(tests, 1), 4),
