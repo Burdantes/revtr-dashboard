@@ -54,12 +54,14 @@ SUMMARY_TABLE = os.getenv(
     "SUMMARY_TABLE", "nsf-2148275-66720.revtr_dashboard.daily_summary"
 )
 
-# On-demand per-destination-AS distribution panel (last AS_DIST_DAYS). This is a
-# heavier live scan (~2.4 GiB: revtr_raw + a hopannotation2 prefix table), so it
-# is NOT part of the hourly auto-refresh — the panel loads it on demand and the
-# result is cached server-side for AS_DIST_CACHE_TTL seconds.
-AS_DIST_DAYS = int(os.getenv("AS_DIST_DAYS", "7"))
-AS_DIST_LIMIT = int(os.getenv("AS_DIST_LIMIT", "1000"))
+# Per-destination-AS-per-day distribution panel. The heavy longest-prefix match
+# (hopannotation2 + the full RouteViews prefix table, ~3 min) is precomputed
+# DAILY by the VM cron (cron/as_dist_runner.py -> as_distribution_7d); the
+# endpoint just reads that small table. AS_DIST_TABLE is read cross-project from
+# nsf. Result is cached in-process for AS_DIST_CACHE_TTL seconds.
+AS_DIST_TABLE = os.getenv(
+    "AS_DIST_TABLE", "nsf-2148275-66720.revtr_dashboard.as_distribution_7d"
+)
 AS_DIST_CACHE_TTL = float(os.getenv("AS_DIST_CACHE_TTL", "3600"))
 
 # Per-hop-type breakdown for the Hop Composition panel. Maps an API key to its
@@ -352,95 +354,28 @@ def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
     return df
 
 
-def fetch_as_test_distribution(start: date, end: date, limit: int) -> pd.DataFrame:
-    """Per-destination-AS test counts / unique IPs / reach / interdomain over ``[start, end)``.
+def fetch_as_distribution() -> pd.DataFrame:
+    """Read the precomputed per-destination-AS-per-day table (one row per AS/day).
 
-    The destination AS (and its ``ASName``) is resolved by longest-prefix-matching
-    ``raw.dst`` against an IPv4 prefix->AS table built from the same window of
-    ``measurement-lab.ndt_raw.hopannotation2`` (RouteViews ``Network`` annotations).
-    Deriving the AS from the type-1 destination hop instead would only cover
-    *reaching* measurements (failures have no destination hop), forcing the reach
-    fraction to ~100%; prefix-matching ``raw.dst`` maps failing measurements too,
-    so the per-AS reach fraction is meaningful. Destinations not covered by any
-    prefix aggregate into a single ``"unmapped"`` row (~19% of tests in practice —
-    revtr targets that never appear in an NDT path).
-
-    Unlike every other panel, this query does NOT exclude the GCP-client range
-    (``34.0.0.0/8``); those destinations are aggregated into a single ``"gcp"``
-    row (``is_gcp = TRUE``) so the volume is visible. That row is the only place
-    on the dashboard GCP-range destinations are counted — every other metric
-    excludes them.
-
-    ``unique_ips`` is the number of distinct destination IPs per AS. Heavy live
-    scan (~2.85 GiB), so callers cache it and run it on demand only.
+    The heavy longest-prefix match (hopannotation2 + the full RouteViews prefix
+    table, ~3 min) is run DAILY by ``cron/as_dist_runner.py`` and written to
+    ``AS_DIST_TABLE``; this just reads it, so the request stays well under the
+    worker timeout. The destination AS is resolved by longest-prefix-matching
+    ``raw.dst`` (covering failing measurements too, so the per-AS reach fraction
+    is meaningful — unlike deriving it from the type-1 destination hop, which
+    only exists for reaching measurements). Destinations not covered by any
+    prefix collapse into an ``"unmapped"`` row; the GCP-client range
+    (``34.0.0.0/8``), excluded from every other panel, is a single ``"gcp"`` row
+    per day. Covers the last 7 full days.
     """
-    prefix_end = end - timedelta(days=1)  # inclusive last day of the window
-    query = r"""
-    WITH
-    prefix4 AS (
-      SELECT DISTINCT
-        NET.IP_FROM_STRING(REGEXP_EXTRACT(raw.Annotations.Network.CIDR, r'^(.*)/')) AS net_bin,
-        CAST(REGEXP_EXTRACT(raw.Annotations.Network.CIDR, r'/(\d+)$') AS INT64) AS mask,
-        raw.Annotations.Network.ASNumber AS asn,
-        raw.Annotations.Network.ASName AS asname
-      FROM `measurement-lab.ndt_raw.hopannotation2`
-      WHERE date BETWEEN DATE('{prefix_start}') AND DATE('{prefix_end}')
-        AND raw.Annotations.Network.CIDR IS NOT NULL
-        AND raw.Annotations.Network.ASNumber IS NOT NULL
-    ),
-    prefix_ip4 AS (
-      SELECT net_bin, mask, asn, asname FROM prefix4
-      WHERE mask BETWEEN 1 AND 32 AND BYTE_LENGTH(net_bin) = 4
-    ),
-    masks AS (SELECT DISTINCT mask FROM prefix_ip4),
-    per_dst AS (
-      SELECT t.raw.dst AS dst,
-        NET.IP_FROM_STRING(t.raw.dst) AS dst_bin,
-        (NET.IP_FROM_STRING(t.raw.dst) BETWEEN NET.IP_FROM_STRING('34.0.0.0')
-           AND NET.IP_FROM_STRING('34.255.255.255')) AS is_gcp,
-        COUNT(*) AS tests,
-        COUNTIF(t.raw.stop_reason = 'REACHES') AS reaches,
-        COUNTIF(t.raw.stop_reason = 'REACHES' AND EXISTS(
-          SELECT 1 FROM UNNEST(t.raw.revtr_hops) h
-          WHERE h.hop_type = 12 AND h.asn IS NOT NULL
-            AND h.asn != IFNULL((SELECT h2.asn FROM UNNEST(t.raw.revtr_hops) h2
-                  WHERE h2.hop_number < h.hop_number AND h2.asn IS NOT NULL
-                  ORDER BY h2.hop_number DESC LIMIT 1), h.asn))) AS interdomain
-      FROM `measurement-lab.revtr_raw.revtr1` t
-      WHERE t.date >= DATE('{start}') AND t.date < DATE('{end}')
-      GROUP BY t.raw.dst
-    ),
-    dst_asn AS (
-      SELECT dst, asn, asname FROM (
-        SELECT d.dst, p.asn, p.asname,
-          ROW_NUMBER() OVER (PARTITION BY d.dst ORDER BY p.mask DESC) AS rn
-        FROM per_dst d
-        JOIN masks k ON BYTE_LENGTH(d.dst_bin) = 4
-        JOIN prefix_ip4 p ON p.mask = k.mask AND p.net_bin = NET.IP_TRUNC(d.dst_bin, k.mask)
-        WHERE NOT d.is_gcp
-      ) WHERE rn = 1
-    ),
-    labeled AS (
-      SELECT
-        CASE WHEN d.is_gcp THEN 'gcp'
-             ELSE COALESCE(CAST(da.asn AS STRING), 'unmapped') END AS asn,
-        CASE WHEN d.is_gcp THEN 'GCP clients (34.0.0.0/8)' ELSE da.asname END AS as_name,
-        d.is_gcp, d.dst, d.tests, d.reaches, d.interdomain
-      FROM per_dst d LEFT JOIN dst_asn da USING(dst)
-    )
-    SELECT asn,
-      ANY_VALUE(as_name) AS as_name,
-      LOGICAL_OR(is_gcp) AS is_gcp,
-      COUNT(*) AS unique_ips,
-      SUM(tests) AS tests, SUM(reaches) AS reaches,
-      SUM(interdomain) AS interdomain_count
-    FROM labeled
-    GROUP BY asn ORDER BY tests DESC LIMIT {limit}
-    """.format(
-        start=start.isoformat(), end=end.isoformat(),
-        prefix_start=start.isoformat(), prefix_end=prefix_end.isoformat(),
-        limit=int(limit),
-    )
+    query = f"""
+    SELECT asn, as_name, is_gcp,
+      FORMAT_DATE('%Y-%m-%d', day) AS day,
+      unique_ips, tests, reaches, interdomain_count,
+      FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', computed_at) AS computed_at
+    FROM `{AS_DIST_TABLE}`
+    ORDER BY tests DESC
+    """
     return run_query(query)
 
 
@@ -810,41 +745,55 @@ def api_hop_quality():
     return jsonify({"daily": daily})
 
 
-# window-key -> (generated_at, payload). Per-worker (gunicorn forks workers), so
-# the cache is best-effort; the worst case is a few extra scans, not staleness.
-_as_dist_cache: dict[tuple, tuple[datetime, dict]] = {}
+# Best-effort in-process cache of the precomputed-table read (per gunicorn
+# worker). The table itself changes at most once/day, so a stale read costs
+# nothing but a slightly old snapshot.
+_as_dist_cache: dict[str, tuple[datetime, dict]] = {}
 
 
 @app.route("/api/as_distribution")
 def api_as_distribution():
-    """On-demand per-destination-AS test distribution over the last AS_DIST_DAYS.
+    """Per-destination-AS-per-day distribution (precomputed daily; see cron/).
 
-    Heavy live scan, so the result is cached server-side for AS_DIST_CACHE_TTL
-    seconds — repeated opens/refreshes within the window are free.
+    Reads the small ``as_distribution_7d`` table and caches it in-process for
+    AS_DIST_CACHE_TTL seconds.
     """
-    today = date.today()
-    start = today - timedelta(days=AS_DIST_DAYS)
-    end = today  # exclusive -> window is [today - AS_DIST_DAYS, today)
-    key = (start.isoformat(), end.isoformat(), AS_DIST_LIMIT)
     now = datetime.now(timezone.utc)
-
-    cached = _as_dist_cache.get(key)
+    cached = _as_dist_cache.get("snapshot")
     if cached is not None and (now - cached[0]).total_seconds() < AS_DIST_CACHE_TTL:
         payload = dict(cached[1])
         payload["cached"] = True
         return jsonify(payload)
 
-    df = fetch_as_test_distribution(start, end, AS_DIST_LIMIT)
+    try:
+        df = fetch_as_distribution()
+    except Exception as e:
+        # The table is rebuilt daily via CREATE OR REPLACE (brief drop/recreate
+        # window); don't 500 the panel if we read mid-rebuild — degrade to an
+        # empty, retryable state.
+        log.warning("as_distribution read failed: %s", e)
+        return jsonify({
+            "window": {"start": None, "end": None, "days": 0},
+            "computed_at": None, "row_count": 0, "rows": [], "cached": False,
+            "error": "AS distribution table is refreshing — try again shortly.",
+        })
     rows = []
+    days: set[str] = set()
+    computed_at = None
     for _, r in df.iterrows():
         tests = _safe_int(r["tests"])
         reaches = _safe_int(r["reaches"])
         inter = _safe_int(r["interdomain_count"])
         name = r["as_name"]
+        day = str(r["day"])
+        days.add(day)
+        if computed_at is None and "computed_at" in df.columns:
+            computed_at = str(r["computed_at"])
         rows.append({
             "asn": r["asn"],
             "as_name": None if name is None or (isinstance(name, float) and pd.isna(name)) else str(name),
             "is_gcp": bool(r["is_gcp"]),
+            "day": day,
             "unique_ips": _safe_int(r["unique_ips"]),
             "tests": tests,
             "reaches": reaches,
@@ -852,16 +801,17 @@ def api_as_distribution():
             "interdomain_count": inter,
             "frac_interdomain": round(inter / max(reaches, 1), 4),
         })
+    days_sorted = sorted(days)
     payload = {
-        "window": {"start": start.isoformat(), "end_exclusive": end.isoformat(),
-                   "days": AS_DIST_DAYS},
-        "limit": AS_DIST_LIMIT,
+        "window": {"start": days_sorted[0] if days_sorted else None,
+                   "end": days_sorted[-1] if days_sorted else None,
+                   "days": len(days_sorted)},
+        "computed_at": computed_at,
         "row_count": len(rows),
         "rows": rows,
-        "generated_at": now.isoformat(),
         "cached": False,
     }
-    _as_dist_cache[key] = (now, payload)
+    _as_dist_cache["snapshot"] = (now, payload)
     return jsonify(payload)
 
 

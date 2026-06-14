@@ -312,13 +312,14 @@
 
   <div class="table-section">
     <h2 style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-      Tests per Destination AS (last 7 days)
+      Tests per Destination AS &mdash; by day (last 7 days)
       <button id="asDistBtn" class="range-btn">Load</button>
       <span id="asDistMeta" class="meta"></span>
     </h2>
     <table>
       <thead>
         <tr>
+          <th class="sortable" data-sort="day">Day</th>
           <th>Dest AS</th>
           <th>AS Name</th>
           <th class="num sortable" data-sort="tests">Tests</th>
@@ -330,13 +331,14 @@
         </tr>
       </thead>
       <tbody id="asDistBody">
-        <tr><td colspan="8" style="color:var(--muted)">Click &ldquo;Load&rdquo; to run the on-demand 7-day per-AS query (~2.85&nbsp;GiB scan, cached 1h). Destination AS &amp; name resolved by longest-prefix match against hopannotation2.</td></tr>
+        <tr><td colspan="9" style="color:var(--muted)">Click &ldquo;Load&rdquo;. One row per AS per day over the last 7 days, precomputed daily (longest-prefix match against hopannotation2 + RouteViews). Sort any column; click Day to group by date.</td></tr>
       </tbody>
     </table>
     <p class="meta" style="margin-top:10px;">
       The <strong style="color:var(--amber)">GCP&nbsp;(34.0.0.0/8)</strong> row is shown here for completeness but is
       <strong>excluded from every other panel</strong> on this dashboard. <strong style="color:var(--muted)">unmapped</strong> =
-      destination IPs not covered by any hopannotation2 prefix (~19% of tests). Window: last 7 days.
+      destination IPs not covered by any RouteViews/hopannotation2 prefix. Destination AS resolved by
+      longest-prefix match (RouteViews full table fills what hopannotation2 misses). Top 500 ASes by volume.
     </p>
   </div>
 
@@ -731,7 +733,11 @@
         return;
       }
       const c = asDistSort.col, dir = asDistSort.dir;
-      const rows = asDistRows.slice().sort((a, b) => (a[c] - b[c]) * dir);
+      const rows = asDistRows.slice().sort((a, b) => {
+        const x = a[c], y = b[c];
+        if (typeof x === 'number' && typeof y === 'number') return (x - y) * dir;
+        return String(x).localeCompare(String(y)) * dir;
+      });
       const esc = s => (s == null ? '' : String(s).replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])));
       tb.innerHTML = rows.map(r => {
         let as;
@@ -739,6 +745,7 @@
         else if (r.asn === 'unmapped') as = '<span style="color:var(--muted)">unmapped</span>';
         else as = 'AS' + r.asn;
         return `<tr>
+          <td>${r.day}</td>
           <td>${as}</td>
           <td style="color:var(--muted)">${esc(r.as_name)}</td>
           <td class="num">${fmt(r.tests)}</td>
@@ -758,13 +765,18 @@
       const meta = document.getElementById('asDistMeta');
       btn.disabled = true;
       btn.textContent = 'Loading…';
-      meta.textContent = 'scanning ~2.4 GiB (first load only)…';
+      meta.textContent = 'loading…';
       try {
         const d = await fetchJSON('/api/as_distribution');
         asDistRows = d.rows || [];
         renderAsDist();
-        const w = d.window || {};
-        meta.textContent = `${d.row_count} ASes · ${w.start}…${w.end_exclusive} · ${d.cached ? 'cached' : 'fresh'}`;
+        if (d.error) {
+          meta.textContent = d.error;
+        } else {
+          const w = d.window || {};
+          const when = d.computed_at ? new Date(d.computed_at).toLocaleString() : '?';
+          meta.textContent = `${d.row_count} AS-days · ${w.start}…${w.end} · computed ${when}`;
+        }
         btn.textContent = 'Reload';
       } catch (e) {
         meta.textContent = 'error: ' + e.message;

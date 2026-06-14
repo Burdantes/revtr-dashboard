@@ -169,28 +169,35 @@ def test_as_distribution_endpoint(client, monkeypatch):
     # Per-destination-AS rows (as fetch_as_test_distribution returns them: asn is
     # a string, "unmapped" for dst IPs with no prefix match). The endpoint derives
     # frac_reached (reaches/tests) and frac_interdomain (interdomain/reaching).
-    appmod._as_dist_cache.clear()  # endpoint caches per window; keep test hermetic
+    appmod._as_dist_cache.clear()  # endpoint caches the snapshot; keep test hermetic
+    # One row per (AS, day): the precomputed as_distribution_7d shape.
     df = pd.DataFrame([
-        {"asn": "7018", "as_name": "AT&T", "is_gcp": False, "unique_ips": 42,
-         "tests": 1000, "reaches": 100, "interdomain_count": 50},
+        {"asn": "7018", "as_name": "AT&T", "is_gcp": False, "day": "2026-06-12",
+         "unique_ips": 42, "tests": 1000, "reaches": 100, "interdomain_count": 50,
+         "computed_at": "2026-06-14T13:30:00Z"},
         {"asn": "gcp", "as_name": "GCP clients (34.0.0.0/8)", "is_gcp": True,
-         "unique_ips": 7, "tests": 500, "reaches": 480, "interdomain_count": 20},
-        {"asn": "unmapped", "as_name": None, "is_gcp": False, "unique_ips": 9,
-         "tests": 200, "reaches": 80, "interdomain_count": 10},
+         "day": "2026-06-12", "unique_ips": 7, "tests": 500, "reaches": 480,
+         "interdomain_count": 20, "computed_at": "2026-06-14T13:30:00Z"},
+        {"asn": "unmapped", "as_name": None, "is_gcp": False, "day": "2026-06-11",
+         "unique_ips": 9, "tests": 200, "reaches": 80, "interdomain_count": 10,
+         "computed_at": "2026-06-14T13:30:00Z"},
     ])
-    monkeypatch.setattr(appmod, "fetch_as_test_distribution", lambda s, e, lim: df)
+    monkeypatch.setattr(appmod, "fetch_as_distribution", lambda: df)
     data = client.get("/api/as_distribution").get_json()
     assert data["row_count"] == 3
-    assert data["window"]["days"] == 7
+    assert data["window"]["days"] == 2                   # two distinct days
+    assert data["window"]["start"] == "2026-06-11"
+    assert data["window"]["end"] == "2026-06-12"
+    assert data["computed_at"] == "2026-06-14T13:30:00Z"
     assert data["cached"] is False
-    rows = {r["asn"]: r for r in data["rows"]}
-    assert rows["7018"]["as_name"] == "AT&T"
-    assert rows["7018"]["unique_ips"] == 42
-    assert rows["7018"]["frac_reached"] == 0.1           # 100 / 1000
-    assert rows["7018"]["frac_interdomain"] == 0.5       # 50 / 100 reaching
-    assert rows["gcp"]["is_gcp"] is True                 # GCP shown as its own row
-    assert rows["unmapped"]["as_name"] is None           # NULL ASName -> null
-    assert rows["unmapped"]["frac_reached"] == 0.4       # 80 / 200
+    rows = {(r["asn"], r["day"]): r for r in data["rows"]}
+    assert rows[("7018", "2026-06-12")]["as_name"] == "AT&T"
+    assert rows[("7018", "2026-06-12")]["unique_ips"] == 42
+    assert rows[("7018", "2026-06-12")]["frac_reached"] == 0.1      # 100 / 1000
+    assert rows[("7018", "2026-06-12")]["frac_interdomain"] == 0.5  # 50 / 100 reaching
+    assert rows[("gcp", "2026-06-12")]["is_gcp"] is True            # GCP shown as its own row
+    assert rows[("unmapped", "2026-06-11")]["as_name"] is None      # NULL ASName -> null
+    assert rows[("unmapped", "2026-06-11")]["frac_reached"] == 0.4  # 80 / 200
 
 
 def test_as_distribution_caches(client, monkeypatch):
@@ -199,13 +206,14 @@ def test_as_distribution_caches(client, monkeypatch):
     appmod._as_dist_cache.clear()
     calls = {"n": 0}
 
-    def _fake(s, e, lim):
+    def _fake():
         calls["n"] += 1
         return pd.DataFrame([{"asn": "1", "as_name": "Example", "is_gcp": False,
-                              "unique_ips": 3, "tests": 10, "reaches": 5,
-                              "interdomain_count": 2}])
+                              "day": "2026-06-12", "unique_ips": 3, "tests": 10,
+                              "reaches": 5, "interdomain_count": 2,
+                              "computed_at": "2026-06-14T13:30:00Z"}])
 
-    monkeypatch.setattr(appmod, "fetch_as_test_distribution", _fake)
+    monkeypatch.setattr(appmod, "fetch_as_distribution", _fake)
     first = client.get("/api/as_distribution").get_json()
     second = client.get("/api/as_distribution").get_json()
     assert first["cached"] is False
