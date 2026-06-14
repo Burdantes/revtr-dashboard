@@ -144,6 +144,9 @@
     tr:last-child td { border-bottom: none; }
     td.num { font-variant-numeric: tabular-nums; text-align: right; }
     th.num { text-align: right; }
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--text); }
+    th.sortable.sorted { color: var(--blue); }
 
     .loading-overlay {
       position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -303,6 +306,29 @@
       </thead>
       <tbody id="hopTableBody">
         <tr><td colspan="8" style="color:var(--muted)">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="table-section">
+    <h2 style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      Tests per Destination AS (last 7 days)
+      <button id="asDistBtn" class="range-btn">Load</button>
+      <span id="asDistMeta" class="meta"></span>
+    </h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Dest AS</th>
+          <th class="num sortable" data-sort="tests">Tests</th>
+          <th class="num sortable" data-sort="frac_reached">% Reached</th>
+          <th class="num sortable" data-sort="reaches">Reaches</th>
+          <th class="num sortable" data-sort="interdomain_count">Interdom Assump</th>
+          <th class="num sortable" data-sort="frac_interdomain">% Interdom (of reaching)</th>
+        </tr>
+      </thead>
+      <tbody id="asDistBody">
+        <tr><td colspan="6" style="color:var(--muted)">Click &ldquo;Load&rdquo; to run the on-demand 7-day per-AS query (~2.4&nbsp;GiB scan, cached 1h). Destination AS resolved by longest-prefix match against hopannotation2.</td></tr>
       </tbody>
     </table>
   </div>
@@ -684,6 +710,66 @@
         btn.classList.add('active');
         currentRange = btn.dataset.range;
         refresh();
+      });
+    });
+
+    // --- Tests per Destination AS (on-demand, sortable) ---
+    let asDistRows = [];
+    let asDistSort = { col: 'tests', dir: -1 };  // dir: -1 desc, 1 asc
+
+    function renderAsDist() {
+      const tb = document.getElementById('asDistBody');
+      if (!asDistRows.length) {
+        tb.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No data.</td></tr>';
+        return;
+      }
+      const c = asDistSort.col, dir = asDistSort.dir;
+      const rows = asDistRows.slice().sort((a, b) => (a[c] - b[c]) * dir);
+      tb.innerHTML = rows.map(r => {
+        const as = r.asn === 'unmapped'
+          ? '<span style="color:var(--muted)">unmapped</span>'
+          : 'AS' + r.asn;
+        return `<tr>
+          <td>${as}</td>
+          <td class="num">${fmt(r.tests)}</td>
+          <td class="num">${pct(r.frac_reached)}</td>
+          <td class="num">${fmt(r.reaches)}</td>
+          <td class="num">${fmt(r.interdomain_count)}</td>
+          <td class="num">${pct(r.frac_interdomain)}</td>
+        </tr>`;
+      }).join('');
+      document.querySelectorAll('th.sortable').forEach(th =>
+        th.classList.toggle('sorted', th.dataset.sort === c));
+    }
+
+    async function loadAsDist() {
+      const btn = document.getElementById('asDistBtn');
+      const meta = document.getElementById('asDistMeta');
+      btn.disabled = true;
+      btn.textContent = 'Loading…';
+      meta.textContent = 'scanning ~2.4 GiB (first load only)…';
+      try {
+        const d = await fetchJSON('/api/as_distribution');
+        asDistRows = d.rows || [];
+        renderAsDist();
+        const w = d.window || {};
+        meta.textContent = `${d.row_count} ASes · ${w.start}…${w.end_exclusive} · ${d.cached ? 'cached' : 'fresh'}`;
+        btn.textContent = 'Reload';
+      } catch (e) {
+        meta.textContent = 'error: ' + e.message;
+        btn.textContent = 'Retry';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById('asDistBtn').addEventListener('click', loadAsDist);
+    document.querySelectorAll('th.sortable').forEach(th => {
+      th.addEventListener('click', () => {
+        const col = th.dataset.sort;
+        if (asDistSort.col === col) asDistSort.dir *= -1;
+        else { asDistSort.col = col; asDistSort.dir = -1; }
+        renderAsDist();
       });
     });
 

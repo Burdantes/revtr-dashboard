@@ -165,6 +165,44 @@ def test_failures_weekly_granularity(client, monkeypatch):
     assert data["totals"]["Timed out"] == 15  # 5+5+5 across both weeks
 
 
+def test_as_distribution_endpoint(client, monkeypatch):
+    # Per-destination-AS rows (as fetch_as_test_distribution returns them: asn is
+    # a string, "unmapped" for dst IPs with no prefix match). The endpoint derives
+    # frac_reached (reaches/tests) and frac_interdomain (interdomain/reaching).
+    appmod._as_dist_cache.clear()  # endpoint caches per window; keep test hermetic
+    df = pd.DataFrame([
+        {"asn": "7018", "tests": 1000, "reaches": 100, "interdomain_count": 50},
+        {"asn": "unmapped", "tests": 200, "reaches": 80, "interdomain_count": 10},
+    ])
+    monkeypatch.setattr(appmod, "fetch_as_test_distribution", lambda s, e, lim: df)
+    data = client.get("/api/as_distribution").get_json()
+    assert data["row_count"] == 2
+    assert data["window"]["days"] == 7
+    assert data["cached"] is False
+    rows = {r["asn"]: r for r in data["rows"]}
+    assert rows["7018"]["frac_reached"] == 0.1           # 100 / 1000
+    assert rows["7018"]["frac_interdomain"] == 0.5       # 50 / 100 reaching
+    assert rows["unmapped"]["frac_reached"] == 0.4       # 80 / 200
+
+
+def test_as_distribution_caches(client, monkeypatch):
+    # Second call within TTL must be served from cache (cached=True) without
+    # re-invoking the (expensive) fetch.
+    appmod._as_dist_cache.clear()
+    calls = {"n": 0}
+
+    def _fake(s, e, lim):
+        calls["n"] += 1
+        return pd.DataFrame([{"asn": "1", "tests": 10, "reaches": 5, "interdomain_count": 2}])
+
+    monkeypatch.setattr(appmod, "fetch_as_test_distribution", _fake)
+    first = client.get("/api/as_distribution").get_json()
+    second = client.get("/api/as_distribution").get_json()
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert calls["n"] == 1  # fetch ran only once
+
+
 def test_hops_skips_no_data_periods(client, monkeypatch):
     # A revtr-down day (total_hops 0/NULL) must be omitted, not shown as 100% "Other".
     df = pd.DataFrame([

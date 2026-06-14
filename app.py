@@ -54,6 +54,14 @@ SUMMARY_TABLE = os.getenv(
     "SUMMARY_TABLE", "nsf-2148275-66720.revtr_dashboard.daily_summary"
 )
 
+# On-demand per-destination-AS distribution panel (last AS_DIST_DAYS). This is a
+# heavier live scan (~2.4 GiB: revtr_raw + a hopannotation2 prefix table), so it
+# is NOT part of the hourly auto-refresh — the panel loads it on demand and the
+# result is cached server-side for AS_DIST_CACHE_TTL seconds.
+AS_DIST_DAYS = int(os.getenv("AS_DIST_DAYS", "7"))
+AS_DIST_LIMIT = int(os.getenv("AS_DIST_LIMIT", "1000"))
+AS_DIST_CACHE_TTL = float(os.getenv("AS_DIST_CACHE_TTL", "3600"))
+
 # Per-hop-type breakdown for the Hop Composition panel. Maps an API key to its
 # daily_summary column and a human-readable interpretation (from the M-Lab
 # revTr blogpost's hop-type taxonomy).
@@ -342,6 +350,78 @@ def fetch_hop_quality(target_day: date, baseline_days: int) -> pd.DataFrame:
     df["frac_type12"] = df["type12_count"] / df["total_reaching"].clip(lower=1)
     df["frac_suspect_rr_atlas"] = df["suspect_rr_atlas_count"] / df["total_reaching"].clip(lower=1)
     return df
+
+
+def fetch_as_test_distribution(start: date, end: date, limit: int) -> pd.DataFrame:
+    """Per-destination-AS test counts / reach / interdomain over ``[start, end)``.
+
+    The destination AS is resolved by longest-prefix-matching ``raw.dst`` against
+    an IPv4 prefix->AS table built from the same window of
+    ``measurement-lab.ndt_raw.hopannotation2`` (RouteViews ``Network`` annotations).
+    Deriving the AS from the type-1 destination hop instead would only cover
+    *reaching* measurements (failures have no destination hop), forcing the reach
+    fraction to ~100%; prefix-matching ``raw.dst`` maps failing measurements too,
+    so the per-AS reach fraction is meaningful. Destinations not covered by any
+    prefix aggregate into a single ``"unmapped"`` row (~19% of tests in practice —
+    revtr targets that never appear in an NDT path).
+
+    Heavy live scan (~2.4 GiB), so callers cache it and run it on demand only.
+    """
+    prefix_end = end - timedelta(days=1)  # inclusive last day of the window
+    query = r"""
+    WITH
+    prefix4 AS (
+      SELECT DISTINCT
+        NET.IP_FROM_STRING(REGEXP_EXTRACT(raw.Annotations.Network.CIDR, r'^(.*)/')) AS net_bin,
+        CAST(REGEXP_EXTRACT(raw.Annotations.Network.CIDR, r'/(\d+)$') AS INT64) AS mask,
+        raw.Annotations.Network.ASNumber AS asn
+      FROM `measurement-lab.ndt_raw.hopannotation2`
+      WHERE date BETWEEN DATE('{prefix_start}') AND DATE('{prefix_end}')
+        AND raw.Annotations.Network.CIDR IS NOT NULL
+        AND raw.Annotations.Network.ASNumber IS NOT NULL
+    ),
+    prefix_ip4 AS (
+      SELECT net_bin, mask, asn FROM prefix4
+      WHERE mask BETWEEN 1 AND 32 AND BYTE_LENGTH(net_bin) = 4
+    ),
+    masks AS (SELECT DISTINCT mask FROM prefix_ip4),
+    per_dst AS (
+      SELECT t.raw.dst AS dst,
+        ANY_VALUE(NET.IP_FROM_STRING(t.raw.dst)) AS dst_bin,
+        COUNT(*) AS tests,
+        COUNTIF(t.raw.stop_reason = 'REACHES') AS reaches,
+        COUNTIF(t.raw.stop_reason = 'REACHES' AND EXISTS(
+          SELECT 1 FROM UNNEST(t.raw.revtr_hops) h
+          WHERE h.hop_type = 12 AND h.asn IS NOT NULL
+            AND h.asn != IFNULL((SELECT h2.asn FROM UNNEST(t.raw.revtr_hops) h2
+                  WHERE h2.hop_number < h.hop_number AND h2.asn IS NOT NULL
+                  ORDER BY h2.hop_number DESC LIMIT 1), h.asn))) AS interdomain
+      FROM `measurement-lab.revtr_raw.revtr1` t
+      WHERE t.date >= DATE('{start}') AND t.date < DATE('{end}')
+        AND NOT (NET.IP_FROM_STRING(t.raw.dst) BETWEEN
+                 NET.IP_FROM_STRING('34.0.0.0') AND NET.IP_FROM_STRING('34.255.255.255'))
+      GROUP BY dst
+    ),
+    dst_asn AS (
+      SELECT dst, asn FROM (
+        SELECT d.dst, p.asn,
+          ROW_NUMBER() OVER (PARTITION BY d.dst ORDER BY p.mask DESC) AS rn
+        FROM per_dst d
+        JOIN masks k ON BYTE_LENGTH(d.dst_bin) = 4
+        JOIN prefix_ip4 p ON p.mask = k.mask AND p.net_bin = NET.IP_TRUNC(d.dst_bin, k.mask)
+      ) WHERE rn = 1
+    )
+    SELECT COALESCE(CAST(da.asn AS STRING), 'unmapped') AS asn,
+      SUM(d.tests) AS tests, SUM(d.reaches) AS reaches,
+      SUM(d.interdomain) AS interdomain_count
+    FROM per_dst d LEFT JOIN dst_asn da USING(dst)
+    GROUP BY asn ORDER BY tests DESC LIMIT {limit}
+    """.format(
+        start=start.isoformat(), end=end.isoformat(),
+        prefix_start=start.isoformat(), prefix_end=prefix_end.isoformat(),
+        limit=int(limit),
+    )
+    return run_query(query)
 
 
 def fetch_hourly_health(target_day: date, baseline_days: int, current_hour: int) -> pd.DataFrame:
@@ -708,6 +788,57 @@ def api_hop_quality():
             "frac_suspect_rr_atlas": round(float(row["frac_suspect_rr_atlas"]), 4),
         })
     return jsonify({"daily": daily})
+
+
+# window-key -> (generated_at, payload). Per-worker (gunicorn forks workers), so
+# the cache is best-effort; the worst case is a few extra scans, not staleness.
+_as_dist_cache: dict[tuple, tuple[datetime, dict]] = {}
+
+
+@app.route("/api/as_distribution")
+def api_as_distribution():
+    """On-demand per-destination-AS test distribution over the last AS_DIST_DAYS.
+
+    Heavy live scan, so the result is cached server-side for AS_DIST_CACHE_TTL
+    seconds — repeated opens/refreshes within the window are free.
+    """
+    today = date.today()
+    start = today - timedelta(days=AS_DIST_DAYS)
+    end = today  # exclusive -> window is [today - AS_DIST_DAYS, today)
+    key = (start.isoformat(), end.isoformat(), AS_DIST_LIMIT)
+    now = datetime.now(timezone.utc)
+
+    cached = _as_dist_cache.get(key)
+    if cached is not None and (now - cached[0]).total_seconds() < AS_DIST_CACHE_TTL:
+        payload = dict(cached[1])
+        payload["cached"] = True
+        return jsonify(payload)
+
+    df = fetch_as_test_distribution(start, end, AS_DIST_LIMIT)
+    rows = []
+    for _, r in df.iterrows():
+        tests = _safe_int(r["tests"])
+        reaches = _safe_int(r["reaches"])
+        inter = _safe_int(r["interdomain_count"])
+        rows.append({
+            "asn": r["asn"],
+            "tests": tests,
+            "reaches": reaches,
+            "frac_reached": round(reaches / max(tests, 1), 4),
+            "interdomain_count": inter,
+            "frac_interdomain": round(inter / max(reaches, 1), 4),
+        })
+    payload = {
+        "window": {"start": start.isoformat(), "end_exclusive": end.isoformat(),
+                   "days": AS_DIST_DAYS},
+        "limit": AS_DIST_LIMIT,
+        "row_count": len(rows),
+        "rows": rows,
+        "generated_at": now.isoformat(),
+        "cached": False,
+    }
+    _as_dist_cache[key] = (now, payload)
+    return jsonify(payload)
 
 
 @app.route("/api/ping")
