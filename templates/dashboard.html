@@ -246,7 +246,10 @@
   </div>
 
   <div class="chart-section">
-    <h2>Failure Reasons (selected range)</h2>
+    <h2 style="display:flex; align-items:center; gap:10px;">
+      Failure Reasons (selected range)
+      <button id="failPctBtn" class="range-btn">Show %</button>
+    </h2>
     <div class="chart-container"><canvas id="failChart"></canvas></div>
   </div>
 
@@ -359,6 +362,8 @@
     let failChart = null;
     let hopCompChart = null;
     let rrChart = null;
+    let failuresData = null;   // last /api/failures payload, for re-render on toggle
+    let failPct = false;       // Failure Reasons chart: percent (100% stacked) vs raw counts
     let siteMap = null;
     let siteMarkers = null;
     let currentRange = '7d';
@@ -567,29 +572,10 @@
           },
         });
 
-        // Failure reasons chart + table
-        const palette = ['#e57373','#ffb74d','#64b5f6','#81c784','#ba68c8','#a1887f','#90a4ae','#f06292','#4db6ac'];
+        // Failure reasons chart (re-renderable for the %/counts toggle) + table
+        failuresData = failures;
+        renderFailChart();
         const failReasons = Object.keys(failures.totals || {});
-        if (failChart) failChart.destroy();
-        failChart = new Chart(document.getElementById('failChart').getContext('2d'), {
-          type: 'bar',
-          data: {
-            labels: (failures.series || []).map(p => p.day),
-            datasets: failReasons.map((r, i) => ({
-              label: r,
-              data: (failures.series || []).map(p => p.reasons[r] || 0),
-              backgroundColor: palette[i % palette.length],
-            })),
-          },
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { labels: { color: '#888' } } },
-            scales: {
-              x: { stacked: true, ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
-              y: { stacked: true, ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
-            },
-          },
-        });
         const failTotal = Object.values(failures.totals || {}).reduce((a, b) => a + b, 0) || 1;
         document.getElementById('failTableBody').innerHTML = failReasons
           .sort((a, b) => failures.totals[b] - failures.totals[a])
@@ -707,6 +693,43 @@
       }
     }
 
+    function renderFailChart() {
+      if (!failuresData) return;
+      const palette = ['#e57373','#ffb74d','#64b5f6','#81c784','#ba68c8','#a1887f','#90a4ae','#f06292','#4db6ac'];
+      const reasons = Object.keys(failuresData.totals || {});
+      const series = failuresData.series || [];
+      // Per-bucket total so percent mode normalizes each bar to 100%.
+      const dayTotals = series.map(p => reasons.reduce((s, r) => s + (p.reasons[r] || 0), 0));
+      const datasets = reasons.map((r, i) => ({
+        label: r,
+        data: series.map((p, j) => {
+          const v = p.reasons[r] || 0;
+          return failPct ? (dayTotals[j] ? v / dayTotals[j] : 0) : v;
+        }),
+        backgroundColor: palette[i % palette.length],
+      }));
+      if (failChart) failChart.destroy();
+      failChart = new Chart(document.getElementById('failChart').getContext('2d'), {
+        type: 'bar',
+        data: { labels: series.map(p => p.day), datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { labels: { color: '#888' } },
+            tooltip: { callbacks: { label: c => failPct
+              ? `${c.dataset.label}: ${(c.parsed.y * 100).toFixed(1)}%`
+              : `${c.dataset.label}: ${fmt(c.parsed.y)}` } },
+          },
+          scales: {
+            x: { stacked: true, ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
+            y: { stacked: true, min: 0, max: failPct ? 1 : undefined,
+                 ticks: { color: '#888', callback: v => failPct ? (v * 100) + '%' : v },
+                 grid: { color: '#2a2d3a' } },
+          },
+        },
+      });
+    }
+
     function median(arr) {
       if (!arr.length) return 0;
       const s = arr.slice().sort((a, b) => a - b);
@@ -800,6 +823,11 @@
 
     document.getElementById('asDistBtn').addEventListener('click', loadAsDist);
     document.getElementById('asDistDay').addEventListener('change', renderAsDist);
+    document.getElementById('failPctBtn').addEventListener('click', () => {
+      failPct = !failPct;
+      document.getElementById('failPctBtn').textContent = failPct ? 'Show counts' : 'Show %';
+      renderFailChart();
+    });
     document.querySelectorAll('th.sortable').forEach(th => {
       th.addEventListener('click', () => {
         const col = th.dataset.sort;
