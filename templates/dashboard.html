@@ -723,7 +723,7 @@
           scales: {
             x: { stacked: true, ticks: { color: '#888' }, grid: { color: '#2a2d3a' } },
             y: { stacked: true, min: 0, max: failPct ? 1 : undefined,
-                 ticks: { color: '#888', callback: v => failPct ? (v * 100) + '%' : v },
+                 ticks: { color: '#888', callback: v => failPct ? (v * 100) + '%' : fmt(v) },
                  grid: { color: '#2a2d3a' } },
           },
         },
