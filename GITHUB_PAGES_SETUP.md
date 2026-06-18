@@ -13,7 +13,7 @@ The dashboard is a single static HTML page that calls a backend API running on a
 ## Architecture
 
 ```
-GitHub Pages (static HTML)  -->  GCE VM API (136.116.232.100:5050)  -->  BigQuery (measurement-lab.revtr_raw.revtr1)
+GitHub Pages (static HTML)  -->  GCE VM API (YOUR_DASHBOARD_HOST:5050)  -->  BigQuery (measurement-lab.revtr_raw.revtr1)
 ```
 
 - **Frontend**: `index.html` — standalone HTML/CSS/JS page, no build step
@@ -27,7 +27,7 @@ GitHub Pages (static HTML)  -->  GCE VM API (136.116.232.100:5050)  -->  BigQuer
 
 2. **Verify the API_BASE URL** in `index.html` points to the running backend:
    ```js
-   const API_BASE = 'http://136.116.232.100:5050';
+   const API_BASE = 'http://YOUR_DASHBOARD_HOST:5050';
    ```
 
 3. **Commit and push** to your GitHub Pages branch (typically `main` or `gh-pages`).
@@ -50,7 +50,7 @@ All served by the Flask backend at `API_BASE`:
 
 - **VM**: `revtr-dashboard` in GCE project `nsf-2148275-66720`, zone `us-central1-a`
 - **Container**: Docker image `revtr-monitor`, auto-restarts, listens on port 5050
-- **Auth**: Uses mounted Application Default Credentials (`loqman@measurementlab.net`)
+- **Auth**: Uses mounted Application Default Credentials (`<your-adc-account>`)
 - **Firewall**: Rule `allow-revtr-dashboard` opens TCP 5050
 - **Source code**: `code/analysis/revtr_monitoring/app.py` + `templates/dashboard.html`
 
@@ -58,7 +58,7 @@ To SSH into the VM:
 ```bash
 gcloud compute ssh revtr-dashboard \
   --project=nsf-2148275-66720 \
-  --account=ls3748@cloudbank.org \
+  --account=<your-gcloud-account> \
   --zone=us-central1-a
 ```
 
@@ -70,8 +70,8 @@ sudo docker logs revtr-monitor
 To rebuild after code changes:
 ```bash
 # From local machine, copy updated files:
-gcloud compute scp app.py revtr-dashboard:~/revtr-monitor/ --zone=us-central1-a --project=nsf-2148275-66720 --account=ls3748@cloudbank.org
-gcloud compute scp -r templates revtr-dashboard:~/revtr-monitor/ --zone=us-central1-a --project=nsf-2148275-66720 --account=ls3748@cloudbank.org
+gcloud compute scp app.py revtr-dashboard:~/revtr-monitor/ --zone=us-central1-a --project=nsf-2148275-66720 --account=<your-gcloud-account>
+gcloud compute scp -r templates revtr-dashboard:~/revtr-monitor/ --zone=us-central1-a --project=nsf-2148275-66720 --account=<your-gcloud-account>
 
 # SSH in and rebuild:
 cd ~/revtr-monitor
@@ -80,6 +80,6 @@ sudo docker stop revtr-monitor && sudo docker rm revtr-monitor
 sudo docker run -d --name revtr-monitor --restart=unless-stopped \
   -p 5050:5050 -e PORT=5050 -e BQ_PROJECT=measurement-lab \
   -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json \
-  -v /home/loqmansalamatian/adc.json:/creds/adc.json:ro \
+  -v $HOME/adc.json:/creds/adc.json:ro \
   revtr-monitor
 ```

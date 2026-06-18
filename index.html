@@ -278,9 +278,10 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <script>
-    // After deploying with deploy.sh, replace this URL with your Cloud Run URL.
+    // Point this at your backend (the Flask API / Cloud Run URL) before deploying.
+    // Override at runtime by setting window.REVTR_API_BASE.
     // Example: 'https://revtr-health-api-abc123-uc.a.run.app'
-    const API_BASE = 'http://136.116.232.100:5050';
+    const API_BASE = window.REVTR_API_BASE || 'http://YOUR_DASHBOARD_HOST:5050';
 
     let trendChart = null;
     let hopChart = null;

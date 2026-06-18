@@ -160,7 +160,9 @@ QUALITY_DROP_RATIO = 0.75
 QUALITY_DROP_ABS = 0.1
 FAIL_RATE_INCREASE_ABS = 0.1
 
-ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "ls3748@columbia.edu")
+# Set these at runtime via env vars (kept out of source so the repo can be public).
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")  # e.g. http://your-host:5050 (shown in alert emails)
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -554,7 +556,7 @@ def send_alert_email(result: dict[str, Any]) -> None:
         f"  Reach rate: {baseline_data.get('reach_rate', '?')}",
         f"  Fail rate: {baseline_data.get('fail_rate', '?')}",
         "",
-        "Dashboard: http://136.116.232.100:5050",
+        f"Dashboard: {DASHBOARD_URL}" if DASHBOARD_URL else "",
     ]
 
     subject = f"[{severity}] revTr health alert — {date.today().isoformat()}"
