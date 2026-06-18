@@ -1,75 +1,111 @@
 # revTr timeout spike since 2026-06-14
 
-**TL;DR.** revTr *timeout* failures jumped ~10–15× starting **June 14**
-(~20–40k/day → ~360–530k/day, still climbing). The clear trigger is **AS16591
-(Google Fiber)**: its reachability collapsed (~51% → ~0.6%) and the 
-same ~400 targets have seen their number of measurements increase (~4 → ~950 probes/IP/day) —
-~344k failed probes on the 14th alone (~87% of that day's timeout surge). From
-the 15th the volume spreads: **Comcast** also shows a genuine reach drop
-(61% → 35%), while several networks that are *chronically* near-unreachable (Eircom, AT&T, Starlink) 
-get probed in far higher volume — adding timeouts without any reachability change.
+**TL;DR.** revTr *timeout* failures jumped ~10–15× starting **June 14** and have
+held through the 16th (~20–40k/day → ~400–530k/day). Overall measurement volume
+is roughly **flat** (~2.5M/day) — so this is a reachability collapse + probe
+*concentration*, not a volume increase. Two networks drive it:
+**AS16591 (Google Fiber)** — reach collapsed ~51% → ~0.3% and the same ~400
+targets get hammered with retries (~4 → ~700–950 probes/IP/day), **persisting
+across the 14th–16th**; and **AS7922 (Comcast)** — a reach drop (61% → 33%) plus a
+volume surge (74k → 344k probes/day) that **ramps over the 15th–16th**, making it
+the single largest contributor by the 16th. Networks like Starlink and AT&T look
+bad but are *chronically* near-unreachable and flat — not part of the change.
+gaplimit (the usual dominant failure mode) is unchanged — the increase is
+**entirely timeouts**.
 
 ## 1. The signal is specifically timeouts
 
-Daily revTr failures by category (M-Lab, GCP `34.0.0.0/8` excluded):
+Daily revTr failures by category (M-Lab, GCP `34.0.0.0/8` excluded). Total
+measurements stay ~flat while reaches fall and timeouts spike:
 
-| day | **timed out** | gaplimit | total failures |
-|-----|--------------:|---------:|---------------:|
-| Jun 9–13 (typical) | 18k–44k | ~0.6–1.2M | 0.7–1.26M |
-| **Jun 14** | **396,554** | 977,190 | 1,390,359 |
-| **Jun 15** | **361,737** | 1,145,998 | 1,529,854 |
-| **Jun 16** | **531,774** | 1,044,255 | 1,595,977 |
+| day | total meas. | reaches | **timed out** | gaplimit | total failures |
+|-----|------------:|--------:|--------------:|---------:|---------------:|
+| Jun 10–13 (avg) | ~2,518,000 | ~1,322,000 | ~31,000 | ~1,144,000 | ~1,196,000 |
+| **Jun 14** | 2,394,865 | 1,004,506 | **396,554** | 977,190 | 1,390,359 |
+| **Jun 15** | 2,763,246 | 1,233,392 | **361,737** | 1,145,998 | 1,529,854 |
+| **Jun 16** | 2,727,153 | 1,131,176 | **531,774** | 1,044,255 | 1,595,977 |
 
-## 2. Google Fiber (AS16591) is the trigger, via a retry storm
+Same total probing, ~15–25% fewer reaches, and the entire failure rise is the
+**timed-out** bucket (gaplimit, the usual dominant mode, is flat).
 
-| period | probes | unique target IPs | reach | probes/IP |
-|--------|-------:|------------------:|------:|----------:|
-| Jun 9–13 | ~1.5–2.8k/day | ~400 | ~53% | ~4 |
+## 2. Google Fiber (AS16591) — reach collapse + retry storm, persists 14–16
+
+| day | probes | unique target IPs | reach | probes/IP |
+|-----|-------:|------------------:|------:|----------:|
+| Jun 10–13 (avg) | ~1,940/day | ~430 | ~50% | ~4 |
 | **Jun 14** | **345,366** | 364 | **0.3%** | **949** |
 | Jun 15 | 103,688 | 467 | 1.5% | 222 |
+| **Jun 16** | **287,498** | 422 | **0.3%** | **681** |
 
-The **same ~400** Google Fiber targets revTr always probes stopped responding 
-around June 14 (the unique-IP count barely moved). What exploded is **attempts
-per IP** (~4 → ~950/day)
+The **same ~400** target IPs revTr always probes stopped responding around June 14
+(unique-IP count barely moves); what exploded is **probes per IP** (~4 →
+~700–950/day). On the 14th alone that's ~344k failed probes ≈ **87% of that day's
+timeout surge**. The collapse + retry storm is sustained on the 14th, 15th and
+16th — the persistent core of the spike.
 
-## 3. Biggest reverse-path reachability drops (Jun 9–13 → Jun 14–15)
+## 3. Does it hold across days? Per-AS reach + volume, Jun 14–16
 
-| AS | network | reach before | reach after |
-|----|---------|-------------:|------------:|
-| **16591** | **Google Fiber** | **50.7%** | **0.6%** |
-| 51852 | Private Layer | 87.7% | 62.9% |
-| 9158 | Telenor | 51.9% | 30.8% |
-| 7922 | Comcast | 61.6% | 41.1% |
-| 63949 | Linode | 82.0% | 66.2% |
+For each network: reach and probes/day, **baseline (Jun 10–13 avg) vs each day**.
+This separates genuine reachability *changes* from networks that are simply
+chronically unreachable.
 
-### Jun 15 - higher probing of already-unreachable networks
+**Reach (% of probes that reach):**
 
-By the 15th the top non-reaching networks split into two groups. Only **Comcast**
-and **Google Fiber** actually *lost* reachability; the rest were already
-near-unreachable before the 14th and simply got probed much more:
+| AS | network | base | Jun 14 | Jun 15 | Jun 16 | verdict |
+|----|---------|-----:|-------:|-------:|-------:|---------|
+| 16591 | Google Fiber | 50% | 0.3% | 1.5% | 0.3% | **collapse, persists** |
+| 7922  | Comcast      | 61% | 60%  | 35%  | 33%  | **drop from the 15th** |
+| 14593 | Starlink     | 1.2% | 1.2% | 1.4% | 1.2% | flat (chronically low) |
+| 7018  | AT&T         | 9%  | 8%   | 7%   | 9%   | flat (chronically low) |
+| 5466  | Eircom       | 7%  | 7%   | 0.6% | 8%   | 1-day dip (15th only) |
 
-| AS | network | reach Jun 9–13 | reach Jun 15 | non-reaching Jun 15 | genuine drop? |
-|----|---------|---------------:|-------------:|--------------------:|---------------|
-| 7922  | Comcast      | 61.4% | 34.5% | 107,471 | **yes** (−27 pts) |
-| 16591 | Google Fiber | 50.5% |  1.5% | 102,153 | **yes** (−49 pts) |
-| 5466  | Eircom       |  6.7% |  0.6% |  72,451 | no — already low |
-| 7018  | AT&T         |  9.3% |  6.9% |  61,439 | no — already low |
-| 14593 | Starlink     |  1.2% |  1.4% |  54,357 | no — always ~1% |
+**Probes/day (baseline avg → each day):**
 
-Eircom / AT&T / Starlink / AS60855 add timeouts because their **probe volume rose**
-(e.g. Eircom ~6k → ~38k probes/day), not because anything changed on their side.
-So the genuine reachability *changes* are confined to Comcast and Google Fiber; 
-the remaining timeout volume is increased probing of chronically-unreachable targets.
+| AS | network | base avg | Jun 14 | Jun 15 | Jun 16 | verdict |
+|----|---------|---------:|-------:|-------:|-------:|---------|
+| 16591 | Google Fiber | ~1,940  | 345,366 | 103,688 | 287,498 | huge (retry storm) |
+| 7922  | Comcast      | ~73,900 |  58,923 | 163,994 | **343,878** | **surges, ramps 15→16** |
+| 14593 | Starlink     | ~56,100 |  50,050 |  55,128 |  52,324 | flat |
+| 7018  | AT&T         | ~45,600 |  35,623 |  66,020 |  44,008 | ~flat |
+| 5466  | Eircom       |  ~6,700 |   4,293 |  72,865 |   6,008 | 1-day spike (15th) |
+
+**Takeaways:**
+- **Google Fiber** and **Comcast** are the two genuine events, and both
+  persist/grow through the 16th. By the 16th they are the two largest
+  non-reaching contributors (Google Fiber ~287k, Comcast ~229k).
+- **Starlink, AT&T** are chronically near-unreachable and **flat** — they inflate
+  raw failure counts but did not change; they are not part of the spike.
+- **Eircom** was a single-day (Jun 15) spike in both volume and failure, already
+  back to normal by the 16th.
+
+Top non-reaching networks on **Jun 16**: Google Fiber 286,667 · Comcast 229,130 ·
+Amazon 64,486 · Starlink 51,670 · AT&T 39,944 · BT 35,215 — Google Fiber +
+Comcast alone are ~516k of the day's non-reaching.
 
 ## 4. Mechanism
 
-target stops responding → probe gets no reply → **timeout** → aggressive retry
-→ timeout volume balloons. A reachability change on a single AS is amplified
-~250× in failure volume by the retry behavior.
+target stops responding → probe gets no reply → **timeout** → aggressive retry →
+timeout volume balloons. The overall probe budget is ~flat, so retries to the
+failing networks (Google Fiber, then Comcast) **concentrate** the budget onto
+timeouts and pull it away from other targets — a reachability change on one or two
+ASes is amplified into hundreds of thousands of timeouts.
 
 ## 5. Open questions
 
-- **Why did ~400 Google Fiber (AS16591) targets go dark on June 14?**?
-- The 15th–16th spread across many unrelated networks at near-0% reach raises the
-  question of a **system / VP / source-side** change vs. independent target
-  outages. Worth checking whether other VPs see the same drop.
+- **Why did ~400 Google Fiber (AS16591) targets go dark on June 14, and why did
+  Comcast (AS7922) start dropping on the 15th?** Same target IPs as before —
+  target-side change, or a VP / source / route change? Do other VPs see it too?
+- Is the probing **concentration** (retries piling onto persistently-failing
+  targets) intended, or should retry/backoff be capped so a couple of
+  reachability changes can't dominate the probe budget and the failure stats?
+
+---
+*Method: failure categories from the revTr health rollup (`daily_summary.fail_reasons`,
+sourced from `measurement-lab.revtr_raw`); per-AS reach/volume from destination-IP→AS
+longest-prefix match (hopannotation2 + RouteViews `pfx2as`), reach =
+`stop_reason='REACHES'` / probes. GCP client range (`34.0.0.0/8`) excluded
+throughout. Baseline is **Jun 10–13** (the per-AS table is a rolling 7-day window;
+Jun 9 has aged out). The aggregate timeout spike (§1) is measured directly; the
+per-AS table has reach/volume but not `fail_reason`, so the per-network attribution
+(§2–3) is inferred from reach collapse + volume — a per-AS `fail_reason` breakdown
+from `revtr_raw` would confirm it.*
