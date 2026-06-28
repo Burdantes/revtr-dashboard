@@ -1,5 +1,5 @@
 -- Backfill daily_summary over [start_date, end_date]. Idempotent per day.
--- GENERATED from 02_rollup_daily.sql (single source of truth for the MERGE).
+-- GENERATED from 02_rollup_daily.sql by gen_rollups.py (do not edit by hand).
 -- Edit the two dates below before running. Each day scans ~0.9 GB.
 DECLARE start_date DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY);
 DECLARE end_date   DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY);
@@ -33,12 +33,38 @@ WHILE target <= end_date DO
               FROM UNNEST(r.raw.revtr_hops) h
               WHERE h.geolocation_ipinfo.lat IS NOT NULL AND h.geolocation_ipinfo.lng IS NOT NULL
                 AND h.hop_type != 4 ORDER BY h.hop_number) AS geo_no4,
-        -- hop-type level counts (this measurement)
+        -- hop-type level counts (this measurement). Type-2 hops are the OLD
+        -- (pre-~May-2025) "symmetry assumption" hops, which carry no asn/geo of
+        -- their own; the pipeline later split these into intradomain (11) /
+        -- interdomain (12). We reconstruct that split from the nearest known-AS
+        -- hop BEFORE vs AFTER each type-2 hop: before-AS != after-AS -> 12;
+        -- before-AS = after-AS -> 11; a neighbor AS missing (path end) -> assumed
+        -- but unclassified (counted in n_assumed only, neither 11 nor 12). The
+        -- (!=)/(=) is NULL-safe: a NULL neighbor yields NULL -> not counted.
+        -- These branches are inert on post-switch data (no hop_type=2 present).
         (SELECT COUNT(*) FROM UNNEST(r.raw.revtr_hops) h) AS n_hops,
         (SELECT COUNTIF(h.hop_type IN (3,4,5,6)) FROM UNNEST(r.raw.revtr_hops) h) AS n_measured,
-        (SELECT COUNTIF(h.hop_type IN (11,12)) FROM UNNEST(r.raw.revtr_hops) h) AS n_assumed,
-        (SELECT COUNTIF(h.hop_type = 11) FROM UNNEST(r.raw.revtr_hops) h) AS n_intra,
-        (SELECT COUNTIF(h.hop_type = 12) FROM UNNEST(r.raw.revtr_hops) h) AS n_inter,
+        (SELECT COUNTIF(h.hop_type IN (11,12) OR h.hop_type = 2) FROM UNNEST(r.raw.revtr_hops) h) AS n_assumed,
+        (SELECT COUNTIF(
+           h.hop_type = 11
+           OR (h.hop_type = 2 AND
+               (SELECT b.asn FROM UNNEST(r.raw.revtr_hops) b
+                WHERE b.hop_number < h.hop_number AND b.asn IS NOT NULL
+                ORDER BY b.hop_number DESC LIMIT 1)
+             = (SELECT a.asn FROM UNNEST(r.raw.revtr_hops) a
+                WHERE a.hop_number > h.hop_number AND a.asn IS NOT NULL
+                ORDER BY a.hop_number ASC LIMIT 1))
+         ) FROM UNNEST(r.raw.revtr_hops) h) AS n_intra,
+        (SELECT COUNTIF(
+           h.hop_type = 12
+           OR (h.hop_type = 2 AND
+               (SELECT b.asn FROM UNNEST(r.raw.revtr_hops) b
+                WHERE b.hop_number < h.hop_number AND b.asn IS NOT NULL
+                ORDER BY b.hop_number DESC LIMIT 1)
+            != (SELECT a.asn FROM UNNEST(r.raw.revtr_hops) a
+                WHERE a.hop_number > h.hop_number AND a.asn IS NOT NULL
+                ORDER BY a.hop_number ASC LIMIT 1))
+         ) FROM UNNEST(r.raw.revtr_hops) h) AS n_inter,
         (SELECT COUNTIF(h.hop_type = 4) FROM UNNEST(r.raw.revtr_hops) h) AS n_type4,
         (SELECT COUNTIF(h.hop_type = 1) FROM UNNEST(r.raw.revtr_hops) h) AS n_type1,
         (SELECT COUNTIF(h.hop_type = 3) FROM UNNEST(r.raw.revtr_hops) h) AS n_type3,
@@ -46,17 +72,31 @@ WHILE target <= end_date DO
         (SELECT COUNTIF(h.hop_type = 6) FROM UNNEST(r.raw.revtr_hops) h) AS n_type6,
         EXISTS(
           SELECT 1 FROM UNNEST(r.raw.revtr_hops) h
-          WHERE h.hop_type = 12 AND h.asn IS NOT NULL
-            AND h.asn != IFNULL((SELECT h2.asn FROM UNNEST(r.raw.revtr_hops) h2
-                                 WHERE h2.hop_number < h.hop_number AND h2.asn IS NOT NULL
-                                 ORDER BY h2.hop_number DESC LIMIT 1), h.asn)
+          WHERE (h.hop_type = 12 AND h.asn IS NOT NULL
+                 AND h.asn != IFNULL((SELECT h2.asn FROM UNNEST(r.raw.revtr_hops) h2
+                                      WHERE h2.hop_number < h.hop_number AND h2.asn IS NOT NULL
+                                      ORDER BY h2.hop_number DESC LIMIT 1), h.asn))
+             OR (h.hop_type = 2 AND
+                 (SELECT b.asn FROM UNNEST(r.raw.revtr_hops) b
+                  WHERE b.hop_number < h.hop_number AND b.asn IS NOT NULL
+                  ORDER BY b.hop_number DESC LIMIT 1)
+              != (SELECT a.asn FROM UNNEST(r.raw.revtr_hops) a
+                  WHERE a.hop_number > h.hop_number AND a.asn IS NOT NULL
+                  ORDER BY a.hop_number ASC LIMIT 1))
         ) AS has_type12,
         EXISTS(
           SELECT 1 FROM UNNEST(r.raw.revtr_hops) h
-          WHERE h.hop_type IN (11,12) AND h.asn IS NOT NULL
-            AND h.asn != IFNULL((SELECT h2.asn FROM UNNEST(r.raw.revtr_hops) h2
-                                 WHERE h2.hop_number < h.hop_number AND h2.asn IS NOT NULL
-                                 ORDER BY h2.hop_number DESC LIMIT 1), h.asn)
+          WHERE (h.hop_type IN (11,12) AND h.asn IS NOT NULL
+                 AND h.asn != IFNULL((SELECT h2.asn FROM UNNEST(r.raw.revtr_hops) h2
+                                      WHERE h2.hop_number < h.hop_number AND h2.asn IS NOT NULL
+                                      ORDER BY h2.hop_number DESC LIMIT 1), h.asn))
+             OR (h.hop_type = 2 AND
+                 (SELECT b.asn FROM UNNEST(r.raw.revtr_hops) b
+                  WHERE b.hop_number < h.hop_number AND b.asn IS NOT NULL
+                  ORDER BY b.hop_number DESC LIMIT 1)
+              != (SELECT a.asn FROM UNNEST(r.raw.revtr_hops) a
+                  WHERE a.hop_number > h.hop_number AND a.asn IS NOT NULL
+                  ORDER BY a.hop_number ASC LIMIT 1))
         ) AS has_interdomain
       FROM `measurement-lab.revtr_raw.revtr1` r, gcp_filter g
       WHERE r.date = target

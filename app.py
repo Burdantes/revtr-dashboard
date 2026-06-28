@@ -49,7 +49,7 @@ BASELINE_DAYS = int(os.getenv("REVTR_BASELINE_DAYS", "7"))
 # Long-range panels read the pre-aggregated rollup table. All queries (raw
 # revtr_raw scans and these summary reads) bill to BQ_PROJECT (measurement-lab);
 # the rollup table lives in nsf and is read cross-project. See fetch_summary.
-RANGE_DAYS = {"7d": 7, "30d": 30, "1y": 365}
+RANGE_DAYS = {"7d": 7, "30d": 30, "1y": 365, "5y": 365 * 5}
 SUMMARY_TABLE = os.getenv(
     "SUMMARY_TABLE", "nsf-2148275-66720.revtr_dashboard.daily_summary"
 )
@@ -98,11 +98,11 @@ def _range_to_window(range_str: str, today: date) -> tuple[date, date]:
 def _granularity_for_range(range_str: str) -> str:
     """Time bucket for a range so long-range charts stay readable.
 
-    7d/30d -> daily; 1y -> weekly; all -> monthly.
+    7d/30d -> daily; 1y -> weekly; 5y/all -> monthly.
     """
     if range_str == "1y":
         return "week"
-    if range_str == "all":
+    if range_str in ("5y", "all"):
         return "month"
     return "day"
 
@@ -729,22 +729,38 @@ def api_rr_responsiveness():
 
 @app.route("/api/hop_quality")
 def api_hop_quality():
-    """Return daily interdomain / type-12 / suspect RR-atlas fractions."""
-    target = date.today()
-    df = fetch_hop_quality(target, BASELINE_DAYS)
+    """Interdomain / type-12 / suspect RR-atlas fractions over the selected range.
+
+    Reads the rollup table (bucketed like the other range-aware panels) so the
+    Hop Quality cards/chart/table follow the dashboard range selector instead of
+    being pinned to the last BASELINE_DAYS. Fractions are recomputed from summed
+    counts per bucket (the suspect RR-atlas count here is the rollup's AS+geo
+    definition, which is stricter than the live AS-only query).
+    """
+    range_str = request.args.get("range", "7d")
+    start, end = _range_to_window(range_str, date.today())
+    gran = _granularity_for_range(range_str)
+    summary = fetch_summary(start, end)
     daily = []
-    for _, row in df.iterrows():
+    for label, s in _bucket_sums(
+        summary, gran,
+        ["total_reaching", "interdomain_count", "type12_count", "suspect_rr_atlas_count"],
+    ):
+        # Skip empty periods (revtr gaps / aged-out raw data) so they don't show as 0%.
+        reaching = s["total_reaching"]
+        if reaching <= 0:
+            continue
         daily.append({
-            "day": row["day"].isoformat(),
-            "total_reaching": int(row["total_reaching"]),
-            "interdomain_count": int(row["interdomain_count"]),
-            "type12_count": int(row["type12_count"]),
-            "suspect_rr_atlas_count": int(row["suspect_rr_atlas_count"]),
-            "frac_interdomain": round(float(row["frac_interdomain"]), 4),
-            "frac_type12": round(float(row["frac_type12"]), 4),
-            "frac_suspect_rr_atlas": round(float(row["frac_suspect_rr_atlas"]), 4),
+            "day": label,
+            "total_reaching": reaching,
+            "interdomain_count": s["interdomain_count"],
+            "type12_count": s["type12_count"],
+            "suspect_rr_atlas_count": s["suspect_rr_atlas_count"],
+            "frac_interdomain": round(s["interdomain_count"] / reaching, 4),
+            "frac_type12": round(s["type12_count"] / reaching, 4),
+            "frac_suspect_rr_atlas": round(s["suspect_rr_atlas_count"] / reaching, 4),
         })
-    return jsonify({"daily": daily})
+    return jsonify({"range": range_str, "granularity": gran, "daily": daily})
 
 
 # Best-effort in-process cache of the precomputed-table read (per gunicorn

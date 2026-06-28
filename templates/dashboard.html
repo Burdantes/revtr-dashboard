@@ -180,6 +180,7 @@
       <button data-range="7d" class="range-btn active">7d</button>
       <button data-range="30d" class="range-btn">30d</button>
       <button data-range="1y" class="range-btn">1y</button>
+      <button data-range="5y" class="range-btn">5y</button>
       <button data-range="all" class="range-btn">All</button>
     </div>
   </header>
@@ -239,7 +240,7 @@
   </div>
 
   <div class="chart-section">
-    <h2>7-Day Trend &mdash; Hop Quality (excluding GCP clients)</h2>
+    <h2>Trend &mdash; Hop Quality (selected range, excluding GCP clients)</h2>
     <div class="chart-container">
       <canvas id="hopChart"></canvas>
     </div>
@@ -295,7 +296,7 @@
   </div>
 
   <div class="table-section">
-    <h2>Hop Quality Breakdown (last 8 days)</h2>
+    <h2>Hop Quality Breakdown (selected range)</h2>
     <table>
       <thead>
         <tr>
@@ -398,7 +399,7 @@
           fetchJSON('/api/health?range=' + currentRange),
           fetchJSON('/api/ping'),
           fetchJSON('/api/queries_today'),
-          fetchJSON('/api/hop_quality'),
+          fetchJSON('/api/hop_quality?range=' + currentRange),
           fetchJSON('/api/sites'),
           fetchJSON('/api/failures?range=' + currentRange),
           fetchJSON('/api/hops?range=' + currentRange),

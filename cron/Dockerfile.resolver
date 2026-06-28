@@ -1,0 +1,9 @@
+# Resolver image: revtr-monitor + a compiled Pytricia radix trie for fast
+# longest-prefix IP->AS matching of historical hop IPs (see resolve_hop_asn.py).
+# Built on the VM:  sudo docker build -f Dockerfile.resolver -t revtr-resolver:latest .
+FROM revtr-monitor:latest
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc python3-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir pytricia
