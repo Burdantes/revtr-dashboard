@@ -93,12 +93,20 @@ docker run --rm --env-file $HOME/revtr-alerts/alert.env \
 
 A Mail Manager ingress point accepts the message into a pipeline. Without a
 "Send to Internet" rule action it is archived or dropped, and the SMTP
-conversation still returns 250. For single-recipient alert mail, standard SES
-is the simpler choice — Mail Manager's filtering, archiving and routing are
-configuration surface you would not be using.
+conversation still returns 250 either way.
+
+**This deployment uses Mail Manager, and it works** — verified 2026-08-15 by
+confirmed inbox delivery, not just a 250. Do not "fix" it by switching to the
+standard SES endpoint. If you ever do rebuild it from scratch, standard SES is
+the simpler starting point for single-recipient alert mail, but there is no
+reason to migrate a working setup.
 
 Either way the `SMTP_FROM` address must be a **verified identity in the same
-region** as the endpoint.
+region** as the endpoint. Note that a 250 at `RCPT TO` proves nothing about
+routing: the ingress point accepts per the traffic policy and defers all
+routing to the rule set, so it returns 250 for essentially any recipient. When
+delivery is in doubt, the answer is in the Mail Manager rule set and archive in
+the AWS console, not in the SMTP conversation.
 
 ## Deploying a change
 
