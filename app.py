@@ -457,6 +457,11 @@ def evaluate_health(
     baseline_reach = float(median(baseline["reach_rate"]))
     baseline_fail = float(median(baseline["fail_rate"]))
 
+    # Days actually present, not the width of the window we asked for. The raw
+    # table has gaps (e.g. 2026-08-07..12 was a total 6-day outage), so calling
+    # a 2-day median a "7-day baseline" overstates it.
+    result["baseline_days"] = int(len(baseline))
+
     result["baseline"] = {
         "total_measurements": round(baseline_total, 1),
         "reach_rate": round(baseline_reach, 4),
@@ -476,19 +481,31 @@ def evaluate_health(
             hard_failures.append(reason)
 
     # --- Hour-aware volume check ---
+    # The volume check must never silently no-op. It used to require BOTH a
+    # today row and a baseline row, so it skipped itself precisely when today
+    # had zero measurements -- the most severe case. Observed live on
+    # 2026-08-15, where 00:00-03:59 UTC had no data at all and nothing fired.
+    hourly_checked = False
     if hourly_df is not None and not hourly_df.empty:
         h_today = hourly_df[hourly_df["day"] == target_day]
         h_baseline = hourly_df[hourly_df["day"] < target_day]
-        if not h_today.empty and not h_baseline.empty:
-            vol_now = float(h_today.iloc[0]["total_measurements"])
+        if not h_baseline.empty:
+            # No row for today == nothing measured yet, not "unknown".
+            vol_now = (
+                float(h_today.iloc[0]["total_measurements"])
+                if not h_today.empty
+                else 0.0
+            )
             vol_baseline = float(median(h_baseline["total_measurements"]))
             result["hourly_volume"] = {
                 "today": round(vol_now),
                 "baseline_median": round(vol_baseline, 1),
             }
             _flag_volume("Volume drop (hour-adjusted)", vol_now, vol_baseline)
-    else:
-        # Fallback to full-day comparison
+            hourly_checked = True
+
+    if not hourly_checked:
+        # Fall back to full-day comparison rather than skipping the check.
         _flag_volume(
             "Volume drop", float(current["total_measurements"]), baseline_total
         )

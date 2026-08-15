@@ -207,9 +207,11 @@ def format_alert(
             f"(baseline median: {t12.get('baseline_median')})"
         )
 
+    n_base = result.get("baseline_days", 0)
     lines += [
         "",
-        f"Baseline medians (prior {result.get('baseline_days', 7)} days):",
+        f"Baseline medians (over {n_base} day{'s' if n_base != 1 else ''} "
+        "actually present in the window):",
         f"  Total measurements: {baseline.get('total_measurements', '?')}",
         f"  Reach rate: {baseline.get('reach_rate', '?')}",
         f"  Fail rate: {baseline.get('fail_rate', '?')}",

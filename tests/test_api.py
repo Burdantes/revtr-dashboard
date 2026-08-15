@@ -292,3 +292,53 @@ def test_healthy_day_is_ok():
     result = appmod.evaluate_health(df, day)
     assert result["severity"] == "ok"
     assert result["triggered"] is False
+
+
+def _hourly_frame(day, today_total, baseline_days=2, baseline_total=490000, include_today=True):
+    rows = []
+    for i in range(baseline_days, 0, -1):
+        d = date.fromordinal(day.toordinal() - i)
+        rows.append({"day": d, "total_measurements": baseline_total,
+                     "reaches_count": 200000, "failed_count": 250000})
+    if include_today:
+        rows.append({"day": day, "total_measurements": today_total,
+                     "reaches_count": 1, "failed_count": 1})
+    return pd.DataFrame(rows)
+
+
+def test_zero_volume_this_hour_is_a_hard_failure_not_a_skipped_check():
+    """The hour-aware check must not vanish when today's row is absent.
+
+    A missing today-row means zero measurements so far, which is the most
+    severe case -- exactly when the check is most needed. Observed live on
+    2026-08-15, where hours 00-03 UTC had no data and the check silently
+    no-opped instead of firing.
+    """
+    day = date(2026, 8, 15)
+    daily = _health_frame(day, 40000, 30000, 4000)
+    hourly = _hourly_frame(day, 0, include_today=False)
+    result = appmod.evaluate_health(daily, day, hourly_df=hourly)
+    assert result["hourly_volume"]["today"] == 0
+    assert any("Volume drop" in r for r in result["hard_failures"])
+    assert result["severity"] == "critical"
+
+
+def test_volume_check_falls_back_to_daily_when_hourly_baseline_missing():
+    """Never skip the volume check outright: fall back rather than no-op."""
+    day = date(2026, 8, 15)
+    daily = _health_frame(day, 400, 300, 40)  # 1% of baseline
+    hourly = _hourly_frame(day, 100, baseline_days=0)  # today only, no baseline
+    result = appmod.evaluate_health(daily, day, hourly_df=hourly)
+    assert any("Volume drop" in r for r in result["reasons"])
+    assert result["severity"] == "critical"
+
+
+def test_baseline_days_reports_days_actually_present_not_the_window():
+    """revtr_raw had a 6-day gap (2026-08-07..12).
+
+    Reporting 'prior 7 days' when only 2 are present overstates the baseline.
+    """
+    day = date(2026, 8, 15)
+    daily = _health_frame(day, 40000, 30000, 4000, baseline_days=2)
+    result = appmod.evaluate_health(daily, day)
+    assert result["baseline_days"] == 2
