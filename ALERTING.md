@@ -65,6 +65,41 @@ down. It never writes dedup state, so it cannot suppress a real alert.
 rm ~/revtr-alerts/state.json
 ```
 
+## Troubleshooting delivery
+
+**Never `source` or `.` `alert.env` in bash.** SMTP passwords routinely contain
+`)`, `%`, `,`, `@` and other shell metacharacters, so sourcing it either throws
+a syntax error or silently mangles the value — and it echoes the password into
+your terminal and scrollback. Docker's `--env-file` takes values **literally**
+with no shell parsing, which is why the container authenticates fine even when
+sourcing the same file fails. Always go through `--env-file`.
+
+**"Sent" is not "delivered."** `send_email()` returning True means the relay
+returned 250. Use `smtp_probe.py` to see the server's final response and any
+queue id:
+
+```bash
+docker run --rm --env-file $HOME/revtr-alerts/alert.env \
+  -v $HOME/revtr-alerts/smtp_probe.py:/probe.py:ro \
+  --entrypoint python revtr-monitor:latest /probe.py
+```
+
+**SES Mail Manager vs standard SES.** These are different products:
+
+| | Endpoint | Username | Sends without extra config? |
+|---|---|---|---|
+| Standard SES | `email-smtp.<region>.amazonaws.com` | `AKIA…` (20 ch) | yes |
+| Mail Manager ingress | `<id>.fips.<x>.mail-manager-smtp.amazonaws.com` | `inp-…` | **no** — the rule set needs a "Send to Internet" action |
+
+A Mail Manager ingress point accepts the message into a pipeline. Without a
+"Send to Internet" rule action it is archived or dropped, and the SMTP
+conversation still returns 250. For single-recipient alert mail, standard SES
+is the simpler choice — Mail Manager's filtering, archiving and routing are
+configuration surface you would not be using.
+
+Either way the `SMTP_FROM` address must be a **verified identity in the same
+region** as the endpoint.
+
 ## Deploying a change
 
 The VM runs from `~/revtr-monitor-git`, a real clone. Images are tagged with the
