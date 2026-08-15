@@ -6,6 +6,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+# app.py imports alerting at module scope: omitting it breaks the whole
+# dashboard, not just the alert path. tests/test_alerting.py guards this.
+COPY alerting.py .
 COPY templates/ templates/
 
 # Report unhealthy if the app stops responding, so a wedge is visible in

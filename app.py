@@ -15,9 +15,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
-import smtplib
 from datetime import date, datetime, timedelta, timezone
-from email.message import EmailMessage
 from statistics import median
 from typing import Any
 
@@ -25,6 +23,8 @@ import pandas as pd
 import requests
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
+
+import alerting
 
 try:
     from dotenv import load_dotenv
@@ -160,14 +160,15 @@ QUALITY_DROP_RATIO = 0.75
 QUALITY_DROP_ABS = 0.1
 FAIL_RATE_INCREASE_ABS = 0.1
 
+# Below this fraction of baseline volume the system is not degraded, it is
+# effectively down. Such a collapse raises only one condition, so without a
+# separate hard-failure tag the count-based ladder would rate a total outage
+# below three mild threshold wobbles. See alerting.classify.
+VOLUME_COLLAPSE_RATIO = float(os.getenv("REVTR_VOLUME_COLLAPSE_RATIO", "0.2"))
+
 # Set these at runtime via env vars (kept out of source so the repo can be public).
-ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
+# SMTP_* / ALERT_EMAIL_TO are read by alerting.SmtpConfig.from_env().
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")  # e.g. http://your-host:5050 (shown in alert emails)
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 
 log = logging.getLogger(__name__)
 
@@ -419,11 +420,24 @@ def evaluate_health(
     day_row = df[df["day"] == target_day]
     baseline = df[df["day"] < target_day]
 
-    result: dict[str, Any] = {"triggered": False, "reasons": [], "today": {}, "baseline": {}}
+    result: dict[str, Any] = {
+        "triggered": False,
+        "reasons": [],
+        "hard_failures": [],
+        "today": {},
+        "baseline": {},
+        "severity": "ok",
+        "baseline_days": BASELINE_DAYS,
+    }
 
     if day_row.empty:
+        # A total absence of data is the single most serious thing that can
+        # happen here, even though it raises exactly one condition.
+        reason = f"No data for {target_day}"
         result["triggered"] = True
-        result["reasons"] = [f"No data for {target_day}"]
+        result["reasons"] = [reason]
+        result["hard_failures"] = [reason]
+        result["severity"] = alerting.classify([reason], hard_failures=[reason])
         return result
 
     current = day_row.iloc[0]
@@ -450,6 +464,16 @@ def evaluate_health(
     }
 
     reasons: list[str] = []
+    hard_failures: list[str] = []
+
+    def _flag_volume(label: str, now_val: float, base_val: float) -> None:
+        """Record a volume shortfall, escalating a collapse to a hard failure."""
+        if base_val <= 0 or now_val >= base_val * VOLUME_DROP_RATIO:
+            return
+        reason = f"{label}: {now_val:.0f} vs baseline {base_val:.0f}"
+        reasons.append(reason)
+        if now_val < base_val * VOLUME_COLLAPSE_RATIO:
+            hard_failures.append(reason)
 
     # --- Hour-aware volume check ---
     if hourly_df is not None and not hourly_df.empty:
@@ -462,15 +486,12 @@ def evaluate_health(
                 "today": round(vol_now),
                 "baseline_median": round(vol_baseline, 1),
             }
-            if vol_baseline > 0 and vol_now < vol_baseline * VOLUME_DROP_RATIO:
-                reasons.append(
-                    f"Volume drop (hour-adjusted): {vol_now:.0f} vs baseline {vol_baseline:.0f}"
-                )
+            _flag_volume("Volume drop (hour-adjusted)", vol_now, vol_baseline)
     else:
         # Fallback to full-day comparison
-        total_now = float(current["total_measurements"])
-        if baseline_total > 0 and total_now < baseline_total * VOLUME_DROP_RATIO:
-            reasons.append(f"Volume drop: {total_now:.0f} vs baseline {baseline_total:.0f}")
+        _flag_volume(
+            "Volume drop", float(current["total_measurements"]), baseline_total
+        )
 
     # --- Reach rate drop ---
     reach_now = float(current["reach_rate"])
@@ -510,76 +531,31 @@ def evaluate_health(
 
     result["triggered"] = bool(reasons)
     result["reasons"] = reasons
-
-    # Severity: 1 flag = warning, 2 = high, 3+ = critical
-    n = len(reasons)
-    result["severity"] = "critical" if n >= 3 else "high" if n == 2 else "warning" if n == 1 else "ok"
+    result["hard_failures"] = hard_failures
+    result["severity"] = alerting.classify(reasons, hard_failures=hard_failures)
 
     return result
 
 
-def send_alert_email(result: dict[str, Any]) -> None:
-    """Send an alert email if SMTP is configured."""
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
-        log.info("SMTP not configured, skipping alert email")
-        return
-
-    severity = result.get("severity", "warning").upper()
-    reasons = result.get("reasons", [])
-    today_data = result.get("today", {})
-    baseline_data = result.get("baseline", {})
-
-    body_lines = [
-        f"Severity: {severity} ({len(reasons)} condition{'s' if len(reasons) != 1 else ''} triggered)",
-        "",
-        "Triggered conditions:",
-    ]
-    for r in reasons:
-        body_lines.append(f"  - {r}")
-    body_lines += [
-        "",
-        "Today's metrics:",
-        f"  Total measurements: {today_data.get('total_measurements', '?')}",
-        f"  Reach rate: {today_data.get('reach_rate', '?')}",
-        f"  Fail rate: {today_data.get('fail_rate', '?')}",
-    ]
-    if "hourly_volume" in result:
-        hv = result["hourly_volume"]
-        body_lines.append(f"  Hourly volume: {hv['today']} (baseline median: {hv['baseline_median']})")
-    if "type12" in result:
-        t12 = result["type12"]
-        body_lines.append(f"  Interdomain assumption: {t12['today']} (baseline median: {t12['baseline_median']})")
-    body_lines += [
-        "",
-        "Baseline medians:",
-        f"  Total measurements: {baseline_data.get('total_measurements', '?')}",
-        f"  Reach rate: {baseline_data.get('reach_rate', '?')}",
-        f"  Fail rate: {baseline_data.get('fail_rate', '?')}",
-        "",
-        f"Dashboard: {DASHBOARD_URL}" if DASHBOARD_URL else "",
-    ]
-
-    subject = f"[{severity}] revTr health alert — {date.today().isoformat()}"
-    body = "\n".join(body_lines)
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = ALERT_EMAIL_TO
-    msg.set_content(body)
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(msg)
-        log.info("Alert email sent to %s", ALERT_EMAIL_TO)
-    except Exception as e:
-        log.error("Failed to send alert email: %s", e)
+# Alert delivery lives in alerting.py so the dashboard and the hourly cron
+# (cron/alert_runner.py) share one severity ladder, one dedup window, and one
+# state file. The previous in-process _last_alert_time global was per gunicorn
+# worker, so with --workers 2 the "one email per hour" cap was really two, and
+# it reset on every restart.
+_ALERT_STATE_PATH = os.getenv(
+    "ALERT_STATE_PATH", str(alerting.DEFAULT_STATE_PATH)
+)
 
 
-# Track last alert to avoid spamming (at most one email per hour)
-_last_alert_time: datetime | None = None
+def send_alert_email(result: dict[str, Any]) -> bool:
+    """Email about a triggered health result, subject to severity + dedup."""
+    return alerting.notify(
+        result,
+        alerting.SmtpConfig.from_env(),
+        state_path=_ALERT_STATE_PATH,
+        day=date.today().isoformat(),
+        dashboard_url=DASHBOARD_URL,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +571,6 @@ def index():
 @app.route("/api/health")
 def api_health():
     """Return today's health metrics + baseline + daily breakdown."""
-    global _last_alert_time
     target = date.today()
     current_hour = datetime.now(timezone.utc).hour
 
@@ -630,12 +605,15 @@ def api_health():
     result["granularity"] = gran
     result["current_hour_utc"] = current_hour
 
-    # Send alert email (at most once per hour)
+    # Opportunistic alert on page load. The hourly cron (cron/alert_runner.py)
+    # is what actually guarantees delivery -- this path only fires when someone
+    # happens to be looking, which is precisely when you least need telling.
+    # Both share alerting.py's dedup state, so they cannot double-send.
     if result["triggered"]:
-        now = datetime.now(timezone.utc)
-        if _last_alert_time is None or (now - _last_alert_time).total_seconds() > 3600:
+        try:
             send_alert_email(result)
-            _last_alert_time = now
+        except Exception:  # noqa: BLE001 - never fail the request over alerting
+            log.exception("Alert dispatch failed")
 
     return jsonify(result)
 

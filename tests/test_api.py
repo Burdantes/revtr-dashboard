@@ -238,3 +238,57 @@ def test_hops_skips_no_data_periods(client, monkeypatch):
     days = [p["day"] for p in body["series"]]
     assert "2026-06-09" not in days   # no-data day omitted
     assert "2026-06-10" in days
+
+
+# ---------------------------------------------------------------------------
+# Severity ladder: hard failures must outrank flag count (see alerting.classify)
+# ---------------------------------------------------------------------------
+
+
+def _health_frame(day, total, reaches, failed, baseline_days=7):
+    """Target day plus a flat baseline window before it."""
+    rows = []
+    for i in range(baseline_days, 0, -1):
+        d = date.fromordinal(day.toordinal() - i)
+        rows.append({"day": d, "total_measurements": 40000,
+                     "reaches_count": 30000, "failed_count": 4000})
+    rows.append({"day": day, "total_measurements": total,
+                 "reaches_count": reaches, "failed_count": failed})
+    df = pd.DataFrame(rows)
+    df["reach_rate"] = df["reaches_count"] / df["total_measurements"].clip(lower=1)
+    df["fail_rate"] = df["failed_count"] / df["total_measurements"].clip(lower=1)
+    return df
+
+
+def test_missing_day_is_critical_not_warning():
+    """A total outage raises one condition; it must not rank below 3 wobbles."""
+    day = date(2026, 8, 14)
+    result = appmod.evaluate_health(_health_frame(day, 1, 1, 0).iloc[:-1], day)
+    assert result["severity"] == "critical"
+    assert result["hard_failures"] == [f"No data for {day}"]
+
+
+def test_volume_collapse_is_a_hard_failure():
+    day = date(2026, 8, 14)
+    # 1% of baseline volume: the system is down, not degraded.
+    df = _health_frame(day, 400, 300, 40)
+    result = appmod.evaluate_health(df, day)
+    assert result["severity"] == "critical"
+    assert any("Volume drop" in r for r in result["hard_failures"])
+
+
+def test_moderate_volume_drop_is_only_a_warning():
+    day = date(2026, 8, 14)
+    # 40% of baseline: below the 50% alert line but above the 20% collapse line.
+    df = _health_frame(day, 16000, 12000, 1600)
+    result = appmod.evaluate_health(df, day)
+    assert result["hard_failures"] == []
+    assert result["severity"] == "warning"
+
+
+def test_healthy_day_is_ok():
+    day = date(2026, 8, 14)
+    df = _health_frame(day, 40000, 30000, 4000)
+    result = appmod.evaluate_health(df, day)
+    assert result["severity"] == "ok"
+    assert result["triggered"] is False

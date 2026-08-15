@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# SMTP app password and alert dedup state. Never commit.
+.env
+alert.env
+*.alert_state.json
