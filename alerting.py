@@ -300,6 +300,55 @@ def send_email(subject: str, body: str, cfg: SmtpConfig) -> bool:
     return True
 
 
+def format_heartbeat(
+    result: dict[str, Any],
+    day: str,
+    dashboard_url: str = "",
+) -> tuple[str, str]:
+    """Render the scheduled all-clear.
+
+    Reuses the alert body so the heartbeat exercises the same formatting path
+    the real alert uses -- a heartbeat that renders differently from an alert
+    would not prove the alert renders at all.
+    """
+    severity = str(result.get("severity", "ok")).upper()
+    _, body = format_alert(result, day=day, dashboard_url=dashboard_url)
+
+    if result.get("triggered"):
+        preamble = (
+            "Scheduled heartbeat. NOTE: conditions are currently triggered -- "
+            "see below. You should also have received a separate alert."
+        )
+    else:
+        preamble = (
+            "Scheduled heartbeat: no anomalies detected. This message exists so "
+            "that silence is informative -- if it stops arriving, the alert "
+            "channel itself has broken."
+        )
+
+    return (
+        f"[{severity}] revTr heartbeat — {day}",
+        preamble + "\n\n" + body,
+    )
+
+
+def send_heartbeat(
+    result: dict[str, Any],
+    cfg: SmtpConfig,
+    day: str | None = None,
+    dashboard_url: str = "",
+) -> bool:
+    """Send the scheduled all-clear.
+
+    Deliberately bypasses should_notify and never writes dedup state: a
+    heartbeat is a digest, not an alert, and must not be able to suppress a
+    real alert that fires in the same window.
+    """
+    day = day or datetime.now(timezone.utc).date().isoformat()
+    subject, body = format_heartbeat(result, day=day, dashboard_url=dashboard_url)
+    return send_email(subject, body, cfg)
+
+
 def notify(
     result: dict[str, Any],
     cfg: SmtpConfig,

@@ -67,6 +67,13 @@ def main() -> int:
              "and bypasses the dedup window.",
     )
     parser.add_argument(
+        "--heartbeat",
+        action="store_true",
+        help="Send a scheduled all-clear regardless of severity. Bypasses the "
+             "dedup window and never writes alert state, so it cannot suppress "
+             "a real alert.",
+    )
+    parser.add_argument(
         "--target-day",
         default=date.today().isoformat(),
         help="Day to evaluate (YYYY-MM-DD). Default: today (UTC-ish, host tz).",
@@ -126,13 +133,24 @@ def main() -> int:
     )
 
     if args.dry_run:
-        subject, body = alerting.format_alert(
+        formatter = (
+            alerting.format_heartbeat if args.heartbeat else alerting.format_alert
+        )
+        subject, body = formatter(
             result, day=args.target_day, dashboard_url=dashboard_url
         )
-        print("--- would send (dry-run) ---" if result.get("triggered") else "--- healthy ---")
+        print("--- would send (dry-run) ---" if (result.get("triggered") or args.heartbeat)
+              else "--- healthy, nothing would be sent ---")
         print(subject)
         print(body)
         return 0
+
+    if args.heartbeat:
+        sent = alerting.send_heartbeat(
+            result, cfg, day=args.target_day, dashboard_url=dashboard_url
+        )
+        log.info("heartbeat_sent=%s", sent)
+        return 0 if sent else 1
 
     sent = alerting.notify(
         result,

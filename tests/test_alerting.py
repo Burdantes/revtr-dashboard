@@ -432,3 +432,59 @@ def test_security_inferred_from_env_port(monkeypatch):
     monkeypatch.setenv("SMTP_PORT", "465")
     monkeypatch.delenv("SMTP_SECURITY", raising=False)
     assert alerting.SmtpConfig.from_env().resolved_security() == "ssl"
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat: a scheduled all-clear so silence is informative
+# ---------------------------------------------------------------------------
+
+
+def _ok_result():
+    return {
+        "triggered": False,
+        "severity": "ok",
+        "reasons": [],
+        "hard_failures": [],
+        "today": {"total_measurements": 2824923, "reach_rate": 0.41, "fail_rate": 0.59},
+        "baseline": {"total_measurements": 2784558.0, "reach_rate": 0.40, "fail_rate": 0.59},
+        "baseline_days": 2,
+    }
+
+
+def test_heartbeat_sends_when_everything_is_healthy(tmp_path, monkeypatch):
+    """The whole point: it must send precisely when there is nothing to report."""
+    sent = {}
+    monkeypatch.setattr(alerting, "send_email", lambda s, b, c: sent.update(subject=s, body=b) or True)
+    cfg = _cfg()
+    assert alerting.send_heartbeat(_ok_result(), cfg, day="2026-08-15") is True
+    assert "HEARTBEAT" in sent["subject"].upper()
+
+
+def test_heartbeat_does_not_touch_alert_dedup_state(tmp_path, monkeypatch):
+    """A Monday heartbeat must not suppress a Monday alert."""
+    monkeypatch.setattr(alerting, "send_email", lambda *a, **k: True)
+    path = tmp_path / "state.json"
+    alerting.send_heartbeat(_ok_result(), _cfg(), day="2026-08-15")
+    assert alerting.load_state(path) == {}
+
+    # A real critical alert immediately afterwards must still go out.
+    assert alerting.notify(
+        _result(), _cfg(), state_path=path, day="2026-08-15", now=NOW
+    ) is True
+
+
+def test_heartbeat_reports_an_active_anomaly_rather_than_claiming_all_clear():
+    subject, body = alerting.format_heartbeat(_result(), day="2026-08-15")
+    assert "CRITICAL" in subject.upper()
+    assert "No data for 2026-08-14" in body
+
+
+def test_heartbeat_says_all_clear_when_healthy():
+    subject, body = alerting.format_heartbeat(_ok_result(), day="2026-08-15")
+    assert "OK" in subject.upper()
+    assert "no anomalies" in body.lower()
+
+
+def test_heartbeat_returns_false_when_smtp_unconfigured():
+    cfg = alerting.SmtpConfig(host="", port=587, user="", password="", sender="", recipients=[])
+    assert alerting.send_heartbeat(_ok_result(), cfg, day="2026-08-15") is False
