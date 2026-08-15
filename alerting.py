@@ -10,6 +10,8 @@ rather than in a process global.
 Configuration is entirely by env var, so the app password stays out of git:
 
     SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
+    SMTP_SECURITY        "starttls" (587), "ssl" (465), "none"; inferred from
+                         SMTP_PORT when unset. Any provider speaking SMTP works.
     ALERT_EMAIL_TO       comma-separated recipients
     ALERT_STATE_PATH     dedup state file (default ~/.revtr_alert_state.json)
     ALERT_MIN_SEVERITY   lowest severity that emails (default "high")
@@ -236,6 +238,10 @@ class SmtpConfig:
     sender: str
     recipients: list[str] = field(default_factory=list)
     timeout: float = 30.0
+    # "starttls" (587), "ssl" (465, implicit TLS), "none", or "" to infer.
+    # Providers differ on this and getting it wrong raises mid-send, which
+    # loses the alert -- so infer from the port unless told otherwise.
+    security: str = ""
 
     @classmethod
     def from_env(cls) -> "SmtpConfig":
@@ -249,7 +255,14 @@ class SmtpConfig:
             sender=os.getenv("SMTP_FROM", user),
             recipients=[x.strip() for x in raw_to.split(",") if x.strip()],
             timeout=float(os.getenv("SMTP_TIMEOUT", "30")),
+            security=os.getenv("SMTP_SECURITY", ""),
         )
+
+    def resolved_security(self) -> str:
+        """Explicit setting wins; otherwise port 465 means implicit TLS."""
+        if self.security:
+            return self.security.strip().lower()
+        return "ssl" if self.port == 465 else "starttls"
 
     def is_complete(self) -> bool:
         return bool(self.host and self.user and self.password and self.recipients)
@@ -271,9 +284,12 @@ def send_email(subject: str, body: str, cfg: SmtpConfig) -> bool:
     msg["To"] = ", ".join(cfg.recipients)
     msg.set_content(body)
 
+    security = cfg.resolved_security()
     try:
-        with smtplib.SMTP(cfg.host, cfg.port, timeout=cfg.timeout) as server:
-            server.starttls()
+        opener = smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP
+        with opener(cfg.host, cfg.port, timeout=cfg.timeout) as server:
+            if security == "starttls":
+                server.starttls()
             server.login(cfg.user, cfg.password)
             server.send_message(msg)
     except Exception as e:  # noqa: BLE001 - alerting must not raise

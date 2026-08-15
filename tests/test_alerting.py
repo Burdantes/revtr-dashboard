@@ -344,3 +344,91 @@ def test_alert_runner_is_importable_without_gcp_credentials():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert hasattr(module, "main")
+
+
+# ---------------------------------------------------------------------------
+# Transport security: 587/STARTTLS vs 465/implicit TLS
+# ---------------------------------------------------------------------------
+
+
+def _fake_smtp(recorder, cls_name):
+    class Fake:
+        def __init__(self, host, port, timeout=None):
+            recorder["cls"] = cls_name
+            recorder["host"] = host
+            recorder["port"] = port
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def starttls(self):
+            recorder["starttls"] = True
+
+        def login(self, u, p):
+            recorder["login"] = (u, p)
+
+        def send_message(self, m):
+            recorder["msg"] = m
+
+    return Fake
+
+
+def _cfg(**kw):
+    base = dict(
+        host="smtp.example.invalid",
+        port=587,
+        user="u@example.invalid",
+        password="pw",
+        sender="u@example.invalid",
+        recipients=["you@example.invalid"],
+    )
+    base.update(kw)
+    return alerting.SmtpConfig(**base)
+
+
+def test_port_587_uses_starttls(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(alerting.smtplib, "SMTP", _fake_smtp(rec, "SMTP"))
+    monkeypatch.setattr(alerting.smtplib, "SMTP_SSL", _fake_smtp(rec, "SMTP_SSL"))
+    assert alerting.send_email("s", "b", _cfg(port=587)) is True
+    assert rec["cls"] == "SMTP"
+    assert rec["starttls"] is True
+
+
+def test_port_465_uses_implicit_tls_and_never_calls_starttls(monkeypatch):
+    """465 is implicit TLS. Calling starttls() on it raises and loses the alert."""
+    rec = {}
+    monkeypatch.setattr(alerting.smtplib, "SMTP", _fake_smtp(rec, "SMTP"))
+    monkeypatch.setattr(alerting.smtplib, "SMTP_SSL", _fake_smtp(rec, "SMTP_SSL"))
+    assert alerting.send_email("s", "b", _cfg(port=465)) is True
+    assert rec["cls"] == "SMTP_SSL"
+    assert "starttls" not in rec
+
+
+def test_explicit_security_overrides_port_inference(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(alerting.smtplib, "SMTP", _fake_smtp(rec, "SMTP"))
+    monkeypatch.setattr(alerting.smtplib, "SMTP_SSL", _fake_smtp(rec, "SMTP_SSL"))
+    assert alerting.send_email("s", "b", _cfg(port=2525, security="ssl")) is True
+    assert rec["cls"] == "SMTP_SSL"
+
+
+def test_security_none_skips_starttls(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(alerting.smtplib, "SMTP", _fake_smtp(rec, "SMTP"))
+    assert alerting.send_email("s", "b", _cfg(port=25, security="none")) is True
+    assert rec["cls"] == "SMTP"
+    assert "starttls" not in rec
+
+
+def test_security_inferred_from_env_port(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.invalid")
+    monkeypatch.setenv("SMTP_USER", "u@example.invalid")
+    monkeypatch.setenv("SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("ALERT_EMAIL_TO", "you@example.invalid")
+    monkeypatch.setenv("SMTP_PORT", "465")
+    monkeypatch.delenv("SMTP_SECURITY", raising=False)
+    assert alerting.SmtpConfig.from_env().resolved_security() == "ssl"
