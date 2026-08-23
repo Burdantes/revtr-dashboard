@@ -111,7 +111,28 @@ standard SES endpoint. If you ever do rebuild it from scratch, standard SES is
 the simpler starting point for single-recipient alert mail, but there is no
 reason to migrate a working setup.
 
-Either way the `SMTP_FROM` address must be a **verified identity in the same
+**The SES sandbox restricts RECIPIENTS, not just senders.** This is the single
+most expensive thing to get wrong here, because it fails *after* a successful
+250. While in the sandbox, every destination address must itself be a verified
+identity. Verified empirically 2026-08-23:
+
+| To | Verified? | SMTP result | Delivered? |
+|---|---|---|---|
+| `alerts@hermes-dashboard.org` | yes (domain) | 250 + queue id | **yes** |
+| `loqman@measurementlab.net` | no | 250 + queue id | **no — silently dropped** |
+
+16 nightly alerts were "sent" successfully to the unverified address over 8 days
+and none arrived. So the recipient is now `alerts@hermes-dashboard.org`, which
+Cloudflare Email Routing forwards onward — that keeps delivery inside the
+sandbox *and* makes every alert visible in the Cloudflare dashboard. The
+alternatives are verifying the external address as an SES identity, or
+requesting production access.
+
+Note that Cloudflare Email Routing is **inbound only**. It never sees outbound
+mail *from* `@hermes-dashboard.org`; for outbound it only serves the DNS. Mail
+appears there because it is addressed *to* the domain and arrives via its MX.
+
+Either way the `SMTP_FROM` address must also be a **verified identity in the same
 region** as the endpoint. Note that a 250 at `RCPT TO` proves nothing about
 routing: the ingress point accepts per the traffic policy and defers all
 routing to the rule set, so it returns 250 for essentially any recipient. When
