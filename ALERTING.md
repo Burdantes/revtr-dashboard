@@ -27,10 +27,20 @@ spike, failure-rate spike, interdomain-assumption spike.
 | `critical` | 3+ conditions, **or any hard failure** | yes |
 
 **Hard failures** are promoted to `critical` regardless of how many conditions
-fired: no data at all for the day, or volume below 20% of baseline. This exists
-because severity used to be a pure count, which meant a total outage — one
-condition — ranked *below* three mild threshold wobbles and would never have
-emailed.
+fired. This exists because severity used to be a pure count, which meant a total
+outage — one condition — ranked *below* three mild threshold wobbles and would
+never have emailed. They are:
+
+- **Data staleness** — newest measurement older than
+  `REVTR_STALENESS_CRITICAL_MINUTES` (default 180). This is the authoritative
+  "revTr stopped" signal; see the partition-day section for why "today's
+  partition is empty" is not.
+- **Volume collapse** — below 20% of baseline (vs. the 50% warning line).
+- **An empty partition**, but *only* when there is no freshness data to judge
+  by. With freshness available, an empty partition is a plain condition, because
+  before 04:00 UTC it is an artifact rather than an outage.
+- **A failed evaluation** — if BigQuery is unreachable we cannot check health at
+  all, which is itself reported rather than silently swallowed.
 
 ## Dedup
 
