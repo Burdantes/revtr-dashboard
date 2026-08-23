@@ -488,3 +488,54 @@ def test_heartbeat_says_all_clear_when_healthy():
 def test_heartbeat_returns_false_when_smtp_unconfigured():
     cfg = alerting.SmtpConfig(host="", port=587, user="", password="", sender="", recipients=[])
     assert alerting.send_heartbeat(_ok_result(), cfg, day="2026-08-15") is False
+
+
+# ---------------------------------------------------------------------------
+# The alert path must survive failure of the thing it monitors
+# ---------------------------------------------------------------------------
+
+
+def test_evaluation_failure_becomes_a_critical_hard_failure():
+    """Being unable to evaluate health is itself an emergency, not a no-op.
+
+    Before this, an exception from BigQuery killed the runner before any mail
+    was sent -- so an expired ADC produced total silence, indistinguishable
+    from a healthy system.
+    """
+    r = alerting.evaluation_failed_result(RuntimeError("invalid_grant"), day="2026-08-17")
+    assert r["severity"] == "critical"
+    assert r["triggered"] is True
+    assert r["hard_failures"], "must be a hard failure, not a count-based one"
+    assert any("invalid_grant" in x for x in r["reasons"])
+
+
+def test_evaluation_failure_names_the_exception_type():
+    r = alerting.evaluation_failed_result(ValueError("bad date"), day="2026-08-17")
+    assert any("ValueError" in x for x in r["reasons"])
+
+
+def test_evaluation_failure_result_formats_without_metric_fields():
+    """It has no today/baseline numbers; formatting must not KeyError."""
+    r = alerting.evaluation_failed_result(RuntimeError("boom"), day="2026-08-17")
+    subject, body = alerting.format_alert(r, day="2026-08-17")
+    assert "CRITICAL" in subject
+    assert "boom" in body
+
+
+def test_evaluation_failure_can_be_delivered_as_a_heartbeat():
+    r = alerting.evaluation_failed_result(RuntimeError("boom"), day="2026-08-17")
+    subject, body = alerting.format_heartbeat(r, day="2026-08-17")
+    assert "CRITICAL" in subject.upper()
+    # Must NOT claim all-clear when it could not actually check.
+    assert "no anomalies" not in body.lower()
+
+
+def test_evaluation_failures_dedup_on_the_condition_not_the_message():
+    """Two different BigQuery errors 20 min apart should not both page."""
+    a = alerting.evaluation_failed_result(RuntimeError("token expired at 12:01"), day="d")
+    b = alerting.evaluation_failed_result(RuntimeError("token expired at 12:21"), day="d")
+    _, state = alerting.should_notify("critical", a["reasons"], state={}, now=NOW)
+    send, _ = alerting.should_notify(
+        "critical", b["reasons"], state=state, now=NOW + timedelta(minutes=20)
+    )
+    assert send is False

@@ -300,6 +300,30 @@ def send_email(subject: str, body: str, cfg: SmtpConfig) -> bool:
     return True
 
 
+def evaluation_failed_result(exc: BaseException, day: str) -> dict[str, Any]:
+    """Turn a failed health evaluation into a critical result.
+
+    Being unable to *check* health is an emergency, not a non-event: an
+    expired ADC or a BigQuery outage previously killed the runner before it
+    sent anything, so a broken monitor looked exactly like a healthy system.
+
+    The reason string puts the condition name before the colon and the volatile
+    detail after it, so _fingerprint dedups on "monitoring is broken" rather
+    than on the specific error text -- otherwise each new error message would
+    re-page every hour.
+    """
+    reason = f"Health evaluation failed: {type(exc).__name__}: {exc}"
+    return {
+        "triggered": True,
+        "severity": "critical",
+        "reasons": [reason],
+        "hard_failures": [reason],
+        "today": {},
+        "baseline": {},
+        "baseline_days": 0,
+    }
+
+
 def format_heartbeat(
     result: dict[str, Any],
     day: str,

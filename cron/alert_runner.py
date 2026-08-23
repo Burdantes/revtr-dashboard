@@ -115,20 +115,32 @@ def main() -> int:
         return 0 if ok else 1
 
     # Imported late so --test-email needs no GCP credentials.
-    import app  # noqa: E402
+    # Everything that can talk to BigQuery is inside the guard. An unguarded
+    # failure here used to kill the process before any mail was sent, so an
+    # expired ADC produced total silence -- and a heartbeat that cannot send
+    # when monitoring breaks is not a channel test at all. Failing to evaluate
+    # is itself reported as critical.
+    evaluation_failed = False
+    try:
+        import app  # noqa: E402
 
-    target = date.fromisoformat(args.target_day)
-    current_hour = datetime.now(timezone.utc).hour
+        target = date.fromisoformat(args.target_day)
+        current_hour = datetime.now(timezone.utc).hour
 
-    df = app.fetch_daily_health(target, app.BASELINE_DAYS)
-    hourly_df = app.fetch_hourly_health(target, app.BASELINE_DAYS, current_hour)
-    hop_df = app.fetch_hop_quality(target, app.BASELINE_DAYS)
-    result = app.evaluate_health(df, target, hourly_df=hourly_df, hop_df=hop_df)
+        df = app.fetch_daily_health(target, app.BASELINE_DAYS)
+        hourly_df = app.fetch_hourly_health(target, app.BASELINE_DAYS, current_hour)
+        hop_df = app.fetch_hop_quality(target, app.BASELINE_DAYS)
+        result = app.evaluate_health(df, target, hourly_df=hourly_df, hop_df=hop_df)
+    except Exception as e:  # noqa: BLE001 - must still deliver the bad news
+        log.exception("Health evaluation failed; reporting as critical")
+        result = alerting.evaluation_failed_result(e, day=args.target_day)
+        evaluation_failed = True
 
     log.info(
-        "severity=%s triggered=%s reasons=%s",
+        "severity=%s triggered=%s evaluation_failed=%s reasons=%s",
         result.get("severity"),
         result.get("triggered"),
+        evaluation_failed,
         json.dumps(result.get("reasons", [])),
     )
 
@@ -161,7 +173,9 @@ def main() -> int:
         min_severity=args.min_severity,
     )
     log.info("email_sent=%s", sent)
-    return 0
+    # Non-zero on evaluation failure so the run is visibly bad in the log even
+    # though the alert itself went out.
+    return 1 if evaluation_failed else 0
 
 
 if __name__ == "__main__":
