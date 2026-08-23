@@ -17,7 +17,8 @@ def _fake_summary():
 def _stub_live(monkeypatch):
     """Stub the live (BQ-hitting) parts of /api/health so tests stay hermetic."""
     monkeypatch.setattr(appmod, "fetch_daily_health", lambda d, b: pd.DataFrame())
-    monkeypatch.setattr(appmod, "fetch_hourly_health", lambda d, b, h: pd.DataFrame())
+    monkeypatch.setattr(appmod, "fetch_hourly_health", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(appmod, "fetch_data_freshness", lambda: {"lag_minutes": -55, "offset_hours": 4})
     monkeypatch.setattr(appmod, "fetch_hop_quality", lambda d, b: pd.DataFrame())
     monkeypatch.setattr(appmod, "evaluate_health", lambda *a, **k: {"triggered": False})
 
@@ -342,3 +343,71 @@ def test_baseline_days_reports_days_actually_present_not_the_window():
     daily = _health_frame(day, 40000, 30000, 4000, baseline_days=2)
     result = appmod.evaluate_health(daily, day)
     assert result["baseline_days"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Partition-boundary awareness (t.date is a 04:00-UTC-to-04:00-UTC day)
+# ---------------------------------------------------------------------------
+
+
+def test_partition_day_before_offset_is_yesterday():
+    """At 00:15 UTC the open partition is still yesterday's."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 23, 0, 15, tzinfo=timezone.utc)
+    assert appmod.partition_day(now, offset_hours=4) == date(2026, 8, 22)
+
+
+def test_partition_day_after_offset_is_today():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 23, 4, 15, tzinfo=timezone.utc)
+    assert appmod.partition_day(now, offset_hours=4) == date(2026, 8, 23)
+
+
+def test_partition_day_exactly_at_boundary_is_today():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 23, 4, 0, tzinfo=timezone.utc)
+    assert appmod.partition_day(now, offset_hours=4) == date(2026, 8, 23)
+
+
+def test_stale_data_is_a_critical_hard_failure():
+    day = date(2026, 8, 23)
+    df = _health_frame(day, 40000, 30000, 4000)
+    result = appmod.evaluate_health(df, day, freshness={"lag_minutes": 600})
+    assert result["severity"] == "critical"
+    assert any("stale" in r.lower() for r in result["hard_failures"])
+
+
+def test_fresh_data_raises_no_staleness_condition():
+    day = date(2026, 8, 23)
+    df = _health_frame(day, 40000, 30000, 4000)
+    result = appmod.evaluate_health(df, day, freshness={"lag_minutes": 30})
+    assert not any("stale" in r.lower() for r in result["reasons"])
+    assert result["severity"] == "ok"
+
+
+def test_timestamps_ahead_of_wall_clock_are_not_stale():
+    """revtr_raw timestamps run ~1h ahead; negative lag must not alarm."""
+    day = date(2026, 8, 23)
+    df = _health_frame(day, 40000, 30000, 4000)
+    result = appmod.evaluate_health(df, day, freshness={"lag_minutes": -55})
+    assert not any("stale" in r.lower() for r in result["reasons"])
+
+
+def test_empty_partition_with_fresh_data_is_not_a_hard_failure():
+    """The nightly false alarm: partition not yet open, but data is flowing.
+
+    Observed 38 times in 8 days -- 2 false critical emails per night.
+    """
+    day = date(2026, 8, 23)
+    baseline_only = _health_frame(day, 1, 1, 0).iloc[:-1]
+    result = appmod.evaluate_health(baseline_only, day, freshness={"lag_minutes": -55})
+    assert result["hard_failures"] == []
+    assert result["severity"] != "critical"
+
+
+def test_empty_partition_without_freshness_info_stays_hard():
+    """Conservative default: with nothing to judge by, treat no-data as critical."""
+    day = date(2026, 8, 23)
+    baseline_only = _health_frame(day, 1, 1, 0).iloc[:-1]
+    result = appmod.evaluate_health(baseline_only, day)
+    assert result["severity"] == "critical"

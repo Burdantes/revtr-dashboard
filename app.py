@@ -15,7 +15,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from statistics import median
 from typing import Any
 
@@ -160,6 +160,19 @@ QUALITY_DROP_RATIO = 0.75
 QUALITY_DROP_ABS = 0.1
 FAIL_RATE_INCREASE_ABS = 0.1
 
+# `revtr_raw.revtr1` is partitioned on a day that runs 04:00 UTC -> 04:00 UTC,
+# not midnight to midnight: partition D holds raw timestamps from D 04:00
+# through D+1 03:59. Evaluating a UTC calendar day against it means that between
+# 00:00 and 04:00 UTC "today's" partition does not exist yet, which read as a
+# total outage and produced two false critical emails every night (38 in 8
+# days). The offset is derived from the data at runtime by fetch_data_freshness;
+# this is the fallback when that derivation is unavailable.
+PARTITION_OFFSET_HOURS = int(os.getenv("REVTR_PARTITION_OFFSET_HOURS", "4"))
+
+# Raw timestamps run ~1h AHEAD of wall clock, so lag is normally negative.
+# Only a positive lag beyond this is evidence that data stopped flowing.
+STALENESS_CRITICAL_MINUTES = float(os.getenv("REVTR_STALENESS_CRITICAL_MINUTES", "180"))
+
 # Below this fraction of baseline volume the system is not degraded, it is
 # effectively down. Such a collapse raises only one condition, so without a
 # separate hard-failure tag the count-based ladder would rate a total outage
@@ -240,6 +253,66 @@ def fetch_summary(start: date, end: date) -> pd.DataFrame:
         return df
     df["day"] = pd.to_datetime(df["day"]).dt.date
     return df
+
+
+def partition_day(now: datetime, offset_hours: int = PARTITION_OFFSET_HOURS) -> date:
+    """The `t.date` partition currently being written at instant `now`.
+
+    Partition D spans [D + offset, D+1 + offset), so before the offset hour the
+    open partition is still yesterday's.
+    """
+    return (now - timedelta(hours=offset_hours)).date()
+
+
+def _partition_start(day: date, offset_hours: int = PARTITION_OFFSET_HOURS) -> datetime:
+    """UTC instant at which partition `day` begins."""
+    return datetime.combine(day, time(0), tzinfo=timezone.utc) + timedelta(
+        hours=offset_hours
+    )
+
+
+def fetch_data_freshness() -> dict[str, Any]:
+    """How stale is the newest measurement, and what is the partition offset?
+
+    Staleness is the authoritative "is revTr still producing data" signal: it
+    measures the thing we care about directly, and unlike "does today's
+    partition have rows" it is immune to partition boundaries and to any DST
+    shift in how the day is defined.
+
+    Also derives the partition offset from the data rather than trusting the
+    configured default, so a change upstream shows up as a logged mismatch
+    instead of silently resurrecting the nightly false alarms.
+    """
+    query = """
+    WITH recent AS (
+      SELECT t.date AS pday, TIMESTAMP_SECONDS(t.raw.date) AS ts
+      FROM `measurement-lab.revtr_raw.revtr1` t
+      WHERE t.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
+    )
+    SELECT
+      TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX(ts), MINUTE) AS lag_minutes,
+      MAX(pday) AS newest_partition,
+      MIN(TIMESTAMP_DIFF(ts, TIMESTAMP(pday), HOUR)) AS offset_hours
+    FROM recent
+    """
+    df = run_query(query)
+    if df.empty or pd.isna(df.iloc[0]["lag_minutes"]):
+        # No rows in three days is itself the alarm; report it as very stale.
+        return {"lag_minutes": None, "offset_hours": PARTITION_OFFSET_HOURS}
+
+    row = df.iloc[0]
+    observed = int(row["offset_hours"])
+    if observed != PARTITION_OFFSET_HOURS:
+        log.warning(
+            "Partition offset changed: observed %dh, configured %dh. "
+            "Set REVTR_PARTITION_OFFSET_HOURS=%d.",
+            observed, PARTITION_OFFSET_HOURS, observed,
+        )
+    return {
+        "lag_minutes": float(row["lag_minutes"]),
+        "newest_partition": row["newest_partition"],
+        "offset_hours": observed,
+    }
 
 
 def fetch_daily_health(target_day: date, baseline_days: int) -> pd.DataFrame:
@@ -382,8 +455,20 @@ def fetch_as_distribution() -> pd.DataFrame:
     return run_query(query)
 
 
-def fetch_hourly_health(target_day: date, baseline_days: int, current_hour: int) -> pd.DataFrame:
-    """Fetch per-day counts truncated to current_hour for fair comparison."""
+def fetch_hourly_health(
+    target_day: date,
+    baseline_days: int,
+    elapsed_seconds: int,
+    offset_hours: int = PARTITION_OFFSET_HOURS,
+) -> pd.DataFrame:
+    """Per-day counts truncated to the same elapsed window inside each partition.
+
+    Truncating on hour-of-day was wrong: partition D contains raw hours
+    04..23 followed by 00..03 of the next calendar day, so `EXTRACT(HOUR) <=
+    current_hour` selected a ragged, non-comparable slice per day. Measuring
+    each row's offset from its own partition start gives every day the same
+    window and is what makes today comparable to the baseline.
+    """
     start = target_day - timedelta(days=baseline_days)
     end = target_day + timedelta(days=1)
     query = f"""
@@ -397,7 +482,11 @@ def fetch_hourly_health(target_day: date, baseline_days: int, current_hour: int)
       AND t.date < DATE('{end.isoformat()}')
       AND NOT (NET.IP_FROM_STRING(t.raw.dst) BETWEEN
                NET.IP_FROM_STRING('34.0.0.0') AND NET.IP_FROM_STRING('34.255.255.255'))
-      AND EXTRACT(HOUR FROM TIMESTAMP_SECONDS(t.raw.date)) <= {current_hour}
+      AND TIMESTAMP_DIFF(
+            TIMESTAMP_SECONDS(t.raw.date),
+            TIMESTAMP_ADD(TIMESTAMP(t.date), INTERVAL {offset_hours} HOUR),
+            SECOND
+          ) <= {elapsed_seconds}
     GROUP BY day
     ORDER BY day
     """
@@ -415,6 +504,7 @@ def evaluate_health(
     target_day: date,
     hourly_df: pd.DataFrame | None = None,
     hop_df: pd.DataFrame | None = None,
+    freshness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return health evaluation dict for JSON serialization."""
     day_row = df[df["day"] == target_day]
@@ -430,14 +520,32 @@ def evaluate_health(
         "baseline_days": BASELINE_DAYS,
     }
 
+    # Staleness of the newest measurement anywhere is the authoritative
+    # "is revTr producing data" signal, and unlike an empty partition it cannot
+    # be faked by the 04:00-UTC day boundary. Note timestamps run ~1h ahead of
+    # wall clock, so lag is normally negative; only positive lag is evidence.
+    stale_reason: str | None = None
+    if freshness is not None:
+        lag = freshness.get("lag_minutes")
+        if lag is None:
+            stale_reason = "Data stale: no measurements in the last 3 days"
+        elif lag > STALENESS_CRITICAL_MINUTES:
+            stale_reason = f"Data stale: newest measurement is {lag / 60:.1f}h old"
+        result["lag_minutes"] = lag
+
     if day_row.empty:
-        # A total absence of data is the single most serious thing that can
-        # happen here, even though it raises exactly one condition.
+        # An empty partition is only alarming if data has actually stopped.
+        # Between 00:00 and the offset hour the current partition legitimately
+        # does not exist yet -- that artifact caused 38 false criticals.
         reason = f"No data for {target_day}"
+        reasons = [reason] if stale_reason is None else [reason, stale_reason]
+        # With no freshness information there is nothing to distinguish an
+        # artifact from an outage, so stay conservative and treat it as hard.
+        hard = [reason] if freshness is None else ([stale_reason] if stale_reason else [])
         result["triggered"] = True
-        result["reasons"] = [reason]
-        result["hard_failures"] = [reason]
-        result["severity"] = alerting.classify([reason], hard_failures=[reason])
+        result["reasons"] = reasons
+        result["hard_failures"] = hard
+        result["severity"] = alerting.classify(reasons, hard_failures=hard)
         return result
 
     current = day_row.iloc[0]
@@ -470,6 +578,10 @@ def evaluate_health(
 
     reasons: list[str] = []
     hard_failures: list[str] = []
+
+    if stale_reason is not None:
+        reasons.append(stale_reason)
+        hard_failures.append(stale_reason)
 
     def _flag_volume(label: str, now_val: float, base_val: float) -> None:
         """Record a volume shortfall, escalating a collapse to a hard failure."""
@@ -588,14 +700,22 @@ def index():
 @app.route("/api/health")
 def api_health():
     """Return today's health metrics + baseline + daily breakdown."""
-    target = date.today()
-    current_hour = datetime.now(timezone.utc).hour
+    now = datetime.now(timezone.utc)
+    freshness = fetch_data_freshness()
+    offset = int(freshness.get("offset_hours", PARTITION_OFFSET_HOURS))
+
+    # "Today" must mean the partition currently being written, not the UTC
+    # calendar day -- see PARTITION_OFFSET_HOURS.
+    target = partition_day(now, offset)
+    elapsed = int((now - _partition_start(target, offset)).total_seconds())
 
     df = fetch_daily_health(target, BASELINE_DAYS)
-    hourly_df = fetch_hourly_health(target, BASELINE_DAYS, current_hour)
+    hourly_df = fetch_hourly_health(target, BASELINE_DAYS, elapsed, offset)
     hop_df = fetch_hop_quality(target, BASELINE_DAYS)
 
-    result = evaluate_health(df, target, hourly_df=hourly_df, hop_df=hop_df)
+    result = evaluate_health(
+        df, target, hourly_df=hourly_df, hop_df=hop_df, freshness=freshness
+    )
 
     # Daily series over the selected range, sourced from the rollup table.
     range_str = request.args.get("range", "7d")
@@ -620,7 +740,9 @@ def api_health():
     result["daily"] = daily
     result["range"] = range_str
     result["granularity"] = gran
-    result["current_hour_utc"] = current_hour
+    result["current_hour_utc"] = now.hour
+    result["partition_day"] = target.isoformat()
+    result["partition_offset_hours"] = offset
 
     # Opportunistic alert on page load. The hourly cron (cron/alert_runner.py)
     # is what actually guarantees delivery -- this path only fires when someone

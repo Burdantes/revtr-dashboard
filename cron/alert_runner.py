@@ -35,6 +35,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import alerting  # noqa: E402
 
+# Sentinel: "--target-day not given", so main() can default to the partition
+# currently being written rather than the UTC calendar date.
+_DEFAULT_DAY = "auto"
+
 
 def _synthetic_result() -> dict:
     """A fake critical result, for verifying delivery without a real outage."""
@@ -75,8 +79,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--target-day",
-        default=date.today().isoformat(),
-        help="Day to evaluate (YYYY-MM-DD). Default: today (UTC-ish, host tz).",
+        default=_DEFAULT_DAY,
+        help="Partition day to evaluate (YYYY-MM-DD). Default: the partition "
+             "currently being written, which before 04:00 UTC is yesterday's "
+             "calendar date -- see app.PARTITION_OFFSET_HOURS.",
     )
     parser.add_argument(
         "--min-severity",
@@ -99,6 +105,11 @@ def main() -> int:
 
     cfg = alerting.SmtpConfig.from_env()
     dashboard_url = os.getenv("DASHBOARD_URL", "")
+    # Provisional label for paths that never reach the evaluation (--test-email)
+    # or that fail inside it; replaced with the resolved partition day below.
+    day_label = (
+        date.today().isoformat() if args.target_day == _DEFAULT_DAY else args.target_day
+    )
 
     if args.test_email:
         if not cfg.is_complete():
@@ -108,7 +119,7 @@ def main() -> int:
             )
             return 2
         subject, body = alerting.format_alert(
-            _synthetic_result(), day=args.target_day, dashboard_url=dashboard_url
+            _synthetic_result(), day=day_label, dashboard_url=dashboard_url
         )
         ok = alerting.send_email("[TEST] " + subject, body, cfg)
         log.info("Test email %s", "sent" if ok else "FAILED")
@@ -124,16 +135,31 @@ def main() -> int:
     try:
         import app  # noqa: E402
 
-        target = date.fromisoformat(args.target_day)
-        current_hour = datetime.now(timezone.utc).hour
+        now = datetime.now(timezone.utc)
+        freshness = app.fetch_data_freshness()
+        offset = int(freshness.get("offset_hours", app.PARTITION_OFFSET_HOURS))
+
+        # Default to the partition currently being written, NOT the UTC
+        # calendar day: before the offset hour those differ, and evaluating the
+        # not-yet-open partition produced a false "no data" critical every
+        # night. An explicit --target-day still wins.
+        if args.target_day == _DEFAULT_DAY:
+            target = app.partition_day(now, offset)
+        else:
+            target = date.fromisoformat(args.target_day)
+        day_label = target.isoformat()
+
+        elapsed = int((now - app._partition_start(target, offset)).total_seconds())
 
         df = app.fetch_daily_health(target, app.BASELINE_DAYS)
-        hourly_df = app.fetch_hourly_health(target, app.BASELINE_DAYS, current_hour)
+        hourly_df = app.fetch_hourly_health(target, app.BASELINE_DAYS, elapsed, offset)
         hop_df = app.fetch_hop_quality(target, app.BASELINE_DAYS)
-        result = app.evaluate_health(df, target, hourly_df=hourly_df, hop_df=hop_df)
+        result = app.evaluate_health(
+            df, target, hourly_df=hourly_df, hop_df=hop_df, freshness=freshness
+        )
     except Exception as e:  # noqa: BLE001 - must still deliver the bad news
         log.exception("Health evaluation failed; reporting as critical")
-        result = alerting.evaluation_failed_result(e, day=args.target_day)
+        result = alerting.evaluation_failed_result(e, day=day_label)
         evaluation_failed = True
 
     log.info(
@@ -149,7 +175,7 @@ def main() -> int:
             alerting.format_heartbeat if args.heartbeat else alerting.format_alert
         )
         subject, body = formatter(
-            result, day=args.target_day, dashboard_url=dashboard_url
+            result, day=day_label, dashboard_url=dashboard_url
         )
         print("--- would send (dry-run) ---" if (result.get("triggered") or args.heartbeat)
               else "--- healthy, nothing would be sent ---")
@@ -159,7 +185,7 @@ def main() -> int:
 
     if args.heartbeat:
         sent = alerting.send_heartbeat(
-            result, cfg, day=args.target_day, dashboard_url=dashboard_url
+            result, cfg, day=day_label, dashboard_url=dashboard_url
         )
         log.info("heartbeat_sent=%s", sent)
         return 0 if sent else 1
@@ -168,7 +194,7 @@ def main() -> int:
         result,
         cfg,
         state_path=args.state_path,
-        day=args.target_day,
+        day=day_label,
         dashboard_url=dashboard_url,
         min_severity=args.min_severity,
     )
