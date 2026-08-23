@@ -130,9 +130,51 @@ docker rm -f revtr-monitor && docker run -d --name revtr-monitor \
 
 ## Cost
 
-~1.33 GiB scanned per evaluation (3 queries against
+~5.37 GiB scanned per evaluation (4 queries against
 `measurement-lab.revtr_raw.revtr1`), billed to `measurement-lab`. Hourly is
-~0.031 TiB/day.
+~0.126 TiB/day, ~$24/month at on-demand list.
+
+An earlier figure of 1.33 GiB was measured on 2026-08-15 while 6 of the 8
+baseline days were empty from the Aug 7-12 outage. Those partitions have
+backfilled; the queries did not change. **Any cost estimate measured over a data
+gap is an underestimate** - check the window is populated before quoting one.
+
+The freshness query is only 0.15 GiB of the total; the bulk is the 8-day
+baseline window. Reading the baseline from `daily_summary` instead of raw would
+cut it substantially and matches the precompute pattern already used for
+`as_distribution_7d`.
+
+## The partition day is not the calendar day
+
+`revtr_raw.revtr1` partitions on a day running **04:00 UTC → 04:00 UTC**.
+Partition `D` holds raw timestamps from `D 04:00` through `D+1 03:59`. So
+between 00:00 and 04:00 UTC, `WHERE DATE(t.date) = CURRENT_DATE()` returns zero
+rows because today's partition has not opened yet.
+
+Read as "no data", that looks identical to a total outage. It generated **38
+false criticals and 16 false alert emails in the first 8 days** — two every
+night at 00:15 and 03:15 UTC, with every hour from 05:00 onward reporting `ok`.
+
+Three rules follow:
+
+- "Today" means the partition being written: `(now_utc − offset).date()`, via
+  `app.partition_day()`. Not `date.today()`.
+- Never truncate on hour-of-day for a today-vs-baseline comparison. A partition's
+  raw hours run 04..23 then 00..03, so `EXTRACT(HOUR) <= current_hour` selects a
+  ragged, non-comparable slice. Compare elapsed time from each row's *own*
+  partition start.
+- **`raw.date` runs ~30–55 min ahead of wall clock**, so
+  `CURRENT_TIMESTAMP() − MAX(raw.date)` is normally negative. Only positive lag
+  is evidence of staleness.
+
+The offset is derived from the data at runtime and a mismatch against
+`REVTR_PARTITION_OFFSET_HOURS` is logged, so an upstream change surfaces instead
+of quietly bringing the false alarms back.
+
+Do **not** try to detect the offset with `MIN(EXTRACT(HOUR FROM raw.date))`
+grouped by partition — it returns 0 for a full partition (which contains hours
+00–03 of the next calendar day) and so reads as proof of alignment. Use
+`MIN(TIMESTAMP_DIFF(ts, TIMESTAMP(pday), HOUR))`.
 
 ## Known limitation
 
