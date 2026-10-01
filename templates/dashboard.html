@@ -240,6 +240,20 @@
   </div>
 
   <div class="chart-section">
+    <h2>
+      Hourly &mdash; Measurements &amp; Reach Rate (last 7 days, UTC, excluding GCP clients)
+      <button id="hourlyResetBtn" class="range-btn">Reset zoom</button>
+    </h2>
+    <div class="chart-container" style="height:280px;">
+      <canvas id="hourlyChart"></canvas>
+    </div>
+    <div style="font-size:12px;color:#888;margin-top:6px;">
+      Drag to zoom into a time window, scroll or pinch to zoom, shift-drag to pan.
+      Hours with no data are shown as zero.
+    </div>
+  </div>
+
+  <div class="chart-section">
     <h2>Trend &mdash; Hop Quality (selected range, excluding GCP clients)</h2>
     <div class="chart-container">
       <canvas id="hopChart"></canvas>
@@ -353,12 +367,15 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
   <script>
     // Set API_BASE to your Cloud Run URL for GitHub Pages deployment.
     // Leave empty when served by Flask locally.
     const API_BASE = window.REVTR_API_BASE || '';
 
     let trendChart = null;
+    let hourlyChart = null;
     let hopChart = null;
     let failChart = null;
     let hopCompChart = null;
@@ -661,9 +678,11 @@
         const sites = sitesData.sites || [];
         if (!siteMap) {
           siteMap = L.map('siteMap', { scrollWheelZoom: true }).setView([20, 0], 2);
-          L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; OpenStreetMap &copy; CARTO',
-            maxZoom: 18,
+          // Keyless OSM tiles. CARTO basemaps now need an API key and serve an
+          // "API KEY REQUIRED" watermark with HTTP 200, so nothing errors.
+          L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+            maxZoom: 19,
           }).addTo(siteMap);
           siteMarkers = L.layerGroup().addTo(siteMap);
         }
@@ -693,6 +712,92 @@
         document.getElementById('loading').textContent = 'Error loading data: ' + err.message;
       }
     }
+
+    // Fixed 7-day window, independent of the range selector. Loaded on its own
+    // so a slow or failed hourly query never blanks the rest of the dashboard.
+    async function loadHourly() {
+      try {
+        const data = await fetchJSON('/api/hourly');
+        const rows = data.hourly || [];
+        // Keep the zoom window across hourly auto-refreshes.
+        const prev = hourlyChart && hourlyChart.isZoomedOrPanned()
+          ? { min: hourlyChart.scales.x.min, max: hourlyChart.scales.x.max } : null;
+        if (hourlyChart) hourlyChart.destroy();
+        hourlyChart = new Chart(document.getElementById('hourlyChart').getContext('2d'), {
+          type: 'bar',
+          data: {
+            labels: rows.map(r => r.hour.slice(5, 16).replace('T', ' ')),
+            datasets: [
+              {
+                label: 'Measurements / hour',
+                data: rows.map(r => r.total_measurements),
+                backgroundColor: 'rgba(52, 152, 219, 0.6)',
+                borderColor: 'rgba(52, 152, 219, 1)',
+                borderWidth: 0,
+                yAxisID: 'y',
+                order: 2,
+              },
+              {
+                label: 'Reach Rate',
+                data: rows.map(r => r.reach_rate),
+                type: 'line',
+                borderColor: 'rgba(46, 204, 113, 1)',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                spanGaps: false,
+                yAxisID: 'y1',
+                order: 1,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { labels: { color: '#888' } },
+              tooltip: { callbacks: { label: c => c.dataset.yAxisID === 'y1'
+                ? `Reach Rate: ${c.raw == null ? 'n/a' : pct(c.raw)}`
+                : `Measurements: ${fmt(c.raw)}` } },
+              zoom: {
+                zoom: {
+                  drag: { enabled: true, backgroundColor: 'rgba(52,152,219,0.15)' },
+                  wheel: { enabled: true },
+                  pinch: { enabled: true },
+                  mode: 'x',
+                },
+                pan: { enabled: true, mode: 'x', modifierKey: 'shift' },
+                limits: { x: { minRange: 3 } },
+              },
+            },
+            scales: {
+              x: { ticks: { color: '#888', maxRotation: 0, autoSkip: true, maxTicksLimit: 14 },
+                   grid: { color: '#2a2d3a' } },
+              y: {
+                position: 'left',
+                title: { display: true, text: 'Measurements / hour', color: '#888' },
+                ticks: { color: '#888' },
+                grid: { color: '#2a2d3a' },
+              },
+              y1: {
+                position: 'right',
+                min: 0, max: 1,
+                title: { display: true, text: 'Reach Rate', color: '#888' },
+                ticks: { color: '#888', callback: v => (v*100)+'%' },
+                grid: { drawOnChartArea: false },
+              },
+            },
+          },
+        });
+        if (prev) hourlyChart.zoomScale('x', prev, 'none');
+      } catch (err) {
+        console.error('hourly chart:', err);
+      }
+    }
+
+    document.getElementById('hourlyResetBtn').addEventListener('click', () => {
+      if (hourlyChart) hourlyChart.resetZoom();
+    });
 
     function renderFailChart() {
       if (!failuresData) return;
@@ -738,9 +843,10 @@
       return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
     }
 
-    document.querySelectorAll('.range-btn').forEach(btn => {
+    // Scoped to the selector: other buttons reuse the .range-btn style.
+    document.querySelectorAll('#rangeSelector .range-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('#rangeSelector .range-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentRange = btn.dataset.range;
         refresh();
@@ -839,7 +945,8 @@
     });
 
     refresh();
-    setInterval(refresh, 60 * 60 * 1000);
+    loadHourly();
+    setInterval(() => { refresh(); loadHourly(); }, 60 * 60 * 1000);
   </script>
 </body>
 </html>

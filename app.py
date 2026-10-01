@@ -950,6 +950,80 @@ def api_as_distribution():
     return jsonify(payload)
 
 
+# Hourly series read straight from revtr_raw (the rollup is daily-only).
+# ~0.95 GB scanned per 7-day call, billed to BQ_PROJECT, so it is cached.
+HOURLY_DAYS = int(os.getenv("REVTR_HOURLY_DAYS", "7"))
+HOURLY_CACHE_TTL = float(os.getenv("REVTR_HOURLY_CACHE_TTL", "900"))
+_hourly_cache: dict[str, tuple[datetime, dict]] = {}
+
+
+def fetch_hourly_series(start: date, end: date) -> pd.DataFrame:
+    """Per-true-UTC-hour counts for partitions [start, end].
+
+    raw.date runs 4h (EDT) / 5h (EST) ahead of true UTC. Rendering it in
+    America/New_York and reading that wall time back as UTC undoes the skew,
+    DST included, and lines the hours up with the partitions (true UTC days).
+    """
+    query = f"""
+    SELECT
+      TIMESTAMP_TRUNC(TIMESTAMP(DATETIME(TIMESTAMP_SECONDS(t.raw.date), 'America/New_York')), HOUR) AS hour,
+      COUNT(*) AS total_measurements,
+      COUNTIF(t.raw.stop_reason = 'REACHES') AS reaches_count,
+      COUNTIF(t.raw.fail_reason IS NOT NULL AND t.raw.stop_reason != 'REACHES') AS failed_count
+    FROM `measurement-lab.revtr_raw.revtr1` t
+    WHERE t.date BETWEEN DATE('{start.isoformat()}') AND DATE('{end.isoformat()}')
+      AND NOT (NET.IP_FROM_STRING(t.raw.dst) BETWEEN
+               NET.IP_FROM_STRING('34.0.0.0') AND NET.IP_FROM_STRING('34.255.255.255'))
+    GROUP BY hour
+    ORDER BY hour
+    """
+    return run_query(query)
+
+
+@app.route("/api/hourly")
+def api_hourly():
+    """Hourly measurements and reach rate over the last HOURLY_DAYS days.
+
+    Hours with no rows between the first and last observed hour are emitted as
+    zeros so an outage is visible as a gap rather than silently skipped.
+    Trailing hours that have not landed yet are not padded.
+    """
+    now = datetime.now(timezone.utc)
+    cached = _hourly_cache.get("snapshot")
+    if cached is not None and (now - cached[0]).total_seconds() < HOURLY_CACHE_TTL:
+        return jsonify({**cached[1], "cached": True})
+
+    end = now.date()
+    start = end - timedelta(days=HOURLY_DAYS - 1)
+    df = fetch_hourly_series(start, end)
+    by_hour: dict[pd.Timestamp, Any] = {}
+    for _, r in df.iterrows():
+        by_hour[pd.Timestamp(r["hour"]).tz_convert("UTC")] = r
+    hourly = []
+    if by_hour:
+        for h in pd.date_range(min(by_hour), max(by_hour), freq="h"):
+            r = by_hour.get(h)
+            total = _safe_int(r["total_measurements"]) if r is not None else 0
+            reaches = _safe_int(r["reaches_count"]) if r is not None else 0
+            failed = _safe_int(r["failed_count"]) if r is not None else 0
+            hourly.append({
+                "hour": h.strftime("%Y-%m-%dT%H:%MZ"),
+                "total_measurements": total,
+                "reaches_count": reaches,
+                "failed_count": failed,
+                "reach_rate": round(reaches / total, 4) if total else None,
+            })
+    payload = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "computed_at": now.isoformat(),
+        "hourly": hourly,
+        "cached": False,
+    }
+    _hourly_cache["snapshot"] = (now, payload)
+    return jsonify(payload)
+
+
 @app.route("/api/ping")
 def api_ping():
     """Check if the revTr API is alive by hitting /sources."""

@@ -411,3 +411,34 @@ def test_empty_partition_without_freshness_info_stays_hard():
     baseline_only = _health_frame(day, 1, 1, 0).iloc[:-1]
     result = appmod.evaluate_health(baseline_only, day)
     assert result["severity"] == "critical"
+
+
+def test_hourly_fills_missing_hours_with_zero(client, monkeypatch):
+    # An outage shows up as hours with no rows at all; they must come back as
+    # zeros, or a category-axis chart silently collapses the gap.
+    appmod._hourly_cache.clear()
+    df = pd.DataFrame([
+        {"hour": pd.Timestamp("2026-10-01 00:00", tz="UTC"),
+         "total_measurements": 100, "reaches_count": 50, "failed_count": 50},
+        {"hour": pd.Timestamp("2026-10-01 03:00", tz="UTC"),
+         "total_measurements": 80, "reaches_count": 60, "failed_count": 20},
+    ])
+    monkeypatch.setattr(appmod, "run_query", lambda q: df)
+    data = client.get("/api/hourly").get_json()
+    hours = [r["hour"] for r in data["hourly"]]
+    assert hours == ["2026-10-01T00:00Z", "2026-10-01T01:00Z",
+                     "2026-10-01T02:00Z", "2026-10-01T03:00Z"]
+    assert [r["total_measurements"] for r in data["hourly"]] == [100, 0, 0, 80]
+    assert data["hourly"][1]["reach_rate"] is None
+    assert data["hourly"][3]["reach_rate"] == 0.75
+
+
+def test_hourly_is_cached(client, monkeypatch):
+    appmod._hourly_cache.clear()
+    calls = []
+    df = pd.DataFrame([{"hour": pd.Timestamp("2026-10-01 00:00", tz="UTC"),
+                        "total_measurements": 1, "reaches_count": 1, "failed_count": 0}])
+    monkeypatch.setattr(appmod, "run_query", lambda q: calls.append(q) or df)
+    client.get("/api/hourly")
+    assert client.get("/api/hourly").get_json()["cached"] is True
+    assert len(calls) == 1
