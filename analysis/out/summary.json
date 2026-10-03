@@ -1,176 +1,474 @@
 {
   "window": [
     "2026-09-20",
-    "2026-09-22"
+    "2026-09-26"
   ],
   "provenance": "measured",
   "generated_by": "revtr_reuse_interarrival.py",
-  "generated_on": "2026-09-26",
+  "generated_on": "2026-10-02",
+  "revtr_client_ip_source": {
+    "events": 13231525,
+    "client_ip_from_scamper_uuid": 13080578,
+    "client_ip_from_hop_type_1": 89421,
+    "client_ip_unknown_dropped": 61526,
+    "hop_type_1_equals_client_ip": 0.7266150840878303,
+    "target_is_client_p24": 0.7593494325106138,
+    "repeat_revtr_within_same_connection": 0.2414726193692715
+  },
+  "ip_to_p24_rollup": {
+    "ndt": {
+      "p24_keys": 3854624,
+      "ips_per_p24_quantiles": {
+        "0.5": 1.0,
+        "0.9": 6.0,
+        "0.99": 48.0
+      },
+      "ips_per_p24_max": 3135,
+      "share_p24_keys_with_multiple_ips": 0.41132520318453886,
+      "share_events_in_multi_ip_p24": 0.8398858040972147
+    },
+    "scamper": {
+      "p24_keys": 6939726,
+      "ips_per_p24_quantiles": {
+        "0.5": 1.0,
+        "0.9": 4.0,
+        "0.99": 32.0
+      },
+      "ips_per_p24_max": 1352,
+      "share_p24_keys_with_multiple_ips": 0.33212708974388905,
+      "share_events_in_multi_ip_p24": 0.4952296674954748
+    },
+    "revtr": {
+      "p24_keys": 1325186,
+      "ips_per_p24_quantiles": {
+        "0.5": 1.0,
+        "0.9": 3.0,
+        "0.99": 24.0
+      },
+      "ips_per_p24_max": 254,
+      "share_p24_keys_with_multiple_ips": 0.3099134762969123,
+      "share_events_in_multi_ip_p24": 0.5963541075439717
+    }
+  },
   "summaries": [
     {
       "stream": "ndt",
-      "events": 18857131,
-      "pairs": 2339433,
-      "pairs_with_repeat": 1956276,
-      "events_in_repeat_pairs": 18473974,
-      "largest_pair_events": 8224,
-      "largest_pair_share": 0.0004361214863491164,
-      "top10_pairs_share": 0.0032299717279367685,
-      "ceiling_hit_rate_T_inf": 0.8759390810829071,
-      "gap_quantiles_s": {
-        "0.1": 9.0,
-        "0.25": 11.0,
-        "0.5": 20.0,
-        "0.75": 1772.0,
-        "0.9": 17875.0
+      "granularity": "ip",
+      "events": 43645699,
+      "keys": 14488849,
+      "keys_with_repeat": 10564393,
+      "events_in_repeat_keys": 39721243,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 5.0,
+        "0.99": 21.0
       },
-      "rows_dropped_no_key_or_ts": 5243
+      "largest_key_events": 2105,
+      "largest_key_share": 4.822926538534759e-05,
+      "top10_keys_share": 0.0004062026821932672,
+      "ceiling_hit_rate_T_inf": 0.6680348961761386,
+      "gap_quantiles_s": {
+        "0.1": 8.0,
+        "0.25": 11.0,
+        "0.5": 13.0,
+        "0.75": 250.0,
+        "0.9": 33379.0
+      },
+      "rows_dropped_no_key_or_ts": 5530
     },
     {
-      "stream": "ndt (excl. top 10 pairs)",
-      "events": 18796223,
-      "pairs": 2339423,
-      "pairs_with_repeat": 1956266,
-      "events_in_repeat_pairs": 18413066,
-      "largest_pair_events": 4100,
-      "largest_pair_share": 0.00021812892941310602,
-      "top10_pairs_share": 0.0019082025149414327,
-      "ceiling_hit_rate_T_inf": 0.8755376013574642,
+      "stream": "ndt (excl. top 10 keys)",
+      "granularity": "ip",
+      "events": 43627970,
+      "keys": 14488839,
+      "keys_with_repeat": 10564383,
+      "events_in_repeat_keys": 39703514,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 5.0,
+        "0.99": 21.0
+      },
+      "largest_key_events": 1492,
+      "largest_key_share": 3.4198244841554624e-05,
+      "top10_keys_share": 0.0003009766441115642,
+      "ceiling_hit_rate_T_inf": 0.667900225474621,
+      "gap_quantiles_s": {
+        "0.1": 8.0,
+        "0.25": 11.0,
+        "0.5": 13.0,
+        "0.75": 250.0,
+        "0.9": 33434.0
+      },
+      "rows_dropped_no_key_or_ts": 5530
+    },
+    {
+      "stream": "ndt",
+      "granularity": "p24",
+      "events": 43645699,
+      "keys": 3854624,
+      "keys_with_repeat": 3288528,
+      "events_in_repeat_keys": 43079603,
+      "events_per_key_quantiles": {
+        "0.5": 3.0,
+        "0.9": 18.0,
+        "0.99": 139.0
+      },
+      "largest_key_events": 16496,
+      "largest_key_share": 0.0003779524759129187,
+      "top10_keys_share": 0.0030506786018022073,
+      "ceiling_hit_rate_T_inf": 0.911683760638133,
       "gap_quantiles_s": {
         "0.1": 9.0,
         "0.25": 11.0,
-        "0.5": 20.0,
-        "0.75": 1795.0,
-        "0.9": 17997.0
+        "0.5": 24.0,
+        "0.75": 2825.0,
+        "0.9": 35115.0
       },
-      "rows_dropped_no_key_or_ts": 5243
+      "rows_dropped_no_key_or_ts": 5530
+    },
+    {
+      "stream": "ndt (excl. top 10 keys)",
+      "granularity": "p24",
+      "events": 43512550,
+      "keys": 3854614,
+      "keys_with_repeat": 3288518,
+      "events_in_repeat_keys": 42946454,
+      "events_per_key_quantiles": {
+        "0.5": 3.0,
+        "0.9": 18.0,
+        "0.99": 139.0
+      },
+      "largest_key_events": 9188,
+      "largest_key_share": 0.00021115747066076339,
+      "top10_keys_share": 0.0018660363504322316,
+      "ceiling_hit_rate_T_inf": 0.9114137415527245,
+      "gap_quantiles_s": {
+        "0.1": 9.0,
+        "0.25": 11.0,
+        "0.5": 24.0,
+        "0.75": 2863.0,
+        "0.9": 35365.0
+      },
+      "rows_dropped_no_key_or_ts": 5530
     },
     {
       "stream": "scamper",
-      "events": 33433150,
-      "pairs": 3966450,
-      "pairs_with_repeat": 3161862,
-      "events_in_repeat_pairs": 32628562,
-      "largest_pair_events": 137882,
-      "largest_pair_share": 0.004124110351552276,
-      "top10_pairs_share": 0.010800238685256997,
-      "ceiling_hit_rate_T_inf": 0.8813617622030828,
+      "granularity": "ip",
+      "events": 78840521,
+      "keys": 19431628,
+      "keys_with_repeat": 13604833,
+      "events_in_repeat_keys": 73013726,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 4.0,
+        "0.99": 16.0
+      },
+      "largest_key_events": 203410,
+      "largest_key_share": 0.002580018465377721,
+      "top10_keys_share": 0.013030050879547079,
+      "ceiling_hit_rate_T_inf": 0.75353247602207,
+      "gap_quantiles_s": {
+        "0.1": 1.0,
+        "0.25": 10.0,
+        "0.5": 14.0,
+        "0.75": 47.0,
+        "0.9": 1480.0
+      },
+      "fresh_share": 0.34997721539663595,
+      "rows_dropped_no_key_or_ts": 6146
+    },
+    {
+      "stream": "scamper (excl. top 10 keys)",
+      "granularity": "ip",
+      "events": 77813225,
+      "keys": 19431618,
+      "keys_with_repeat": 13604823,
+      "events_in_repeat_keys": 71986430,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 4.0,
+        "0.99": 16.0
+      },
+      "largest_key_events": 42110,
+      "largest_key_share": 0.0005411676485584552,
+      "top10_keys_share": 0.004335933898125929,
+      "ceiling_hit_rate_T_inf": 0.750278721901065,
+      "gap_quantiles_s": {
+        "0.1": 1.0,
+        "0.25": 10.0,
+        "0.5": 15.0,
+        "0.75": 48.0,
+        "0.9": 1670.0
+      },
+      "fresh_share": 0.3545824890306243,
+      "rows_dropped_no_key_or_ts": 6146
+    },
+    {
+      "stream": "scamper",
+      "granularity": "p24",
+      "events": 78840521,
+      "keys": 6939726,
+      "keys_with_repeat": 5636179,
+      "events_in_repeat_keys": 77536974,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 12.0,
+        "0.99": 84.0
+      },
+      "largest_key_events": 310993,
+      "largest_key_share": 0.003944583268291695,
+      "top10_keys_share": 0.015371587917335047,
+      "ceiling_hit_rate_T_inf": 0.911977674526022,
       "gap_quantiles_s": {
         "0.1": 2.0,
         "0.25": 10.0,
-        "0.5": 20.0,
-        "0.75": 143.0,
-        "0.9": 9198.0
+        "0.5": 21.0,
+        "0.75": 274.0,
+        "0.9": 17997.0
       },
-      "fresh_share": 0.35550529938100356,
-      "rows_dropped_no_key_or_ts": 1280
+      "fresh_share": 0.34997721539663595,
+      "rows_dropped_no_key_or_ts": 6146
     },
     {
-      "stream": "scamper (excl. top 10 pairs)",
-      "events": 33072064,
-      "pairs": 3966440,
-      "pairs_with_repeat": 3161852,
-      "events_in_repeat_pairs": 32267476,
-      "largest_pair_events": 12945,
-      "largest_pair_share": 0.00039141796532565976,
-      "top10_pairs_share": 0.003913333017255893,
-      "ceiling_hit_rate_T_inf": 0.8800667536202156,
+      "stream": "scamper (excl. top 10 keys)",
+      "granularity": "p24",
+      "events": 77628617,
+      "keys": 6939716,
+      "keys_with_repeat": 5636169,
+      "events_in_repeat_keys": 76325070,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 12.0,
+        "0.99": 84.0
+      },
+      "largest_key_events": 31889,
+      "largest_key_share": 0.00041078923253263675,
+      "top10_keys_share": 0.003978558577180371,
+      "ceiling_hit_rate_T_inf": 0.9106036373158626,
       "gap_quantiles_s": {
         "0.1": 3.0,
         "0.25": 11.0,
-        "0.5": 21.0,
-        "0.75": 157.0,
-        "0.9": 9481.0
+        "0.5": 22.0,
+        "0.75": 316.0,
+        "0.9": 18836.0
       },
-      "fresh_share": 0.359331700615964,
-      "rows_dropped_no_key_or_ts": 1280
+      "fresh_share": 0.3554231167096536,
+      "rows_dropped_no_key_or_ts": 6146
     },
     {
       "stream": "revtr",
-      "events": 5918719,
-      "pairs": 840321,
-      "pairs_with_repeat": 483832,
-      "events_in_repeat_pairs": 5562230,
-      "largest_pair_events": 17239,
-      "largest_pair_share": 0.0029126234916710863,
-      "top10_pairs_share": 0.02088323503785194,
-      "ceiling_hit_rate_T_inf": 0.858023163458174,
+      "granularity": "ip",
+      "events": 13169999,
+      "keys": 3127544,
+      "keys_with_repeat": 1937666,
+      "events_in_repeat_keys": 11980121,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 6.0,
+        "0.99": 28.0
+      },
+      "largest_key_events": 23518,
+      "largest_key_share": 0.0017857252684681298,
+      "top10_keys_share": 0.017610631557375214,
+      "ceiling_hit_rate_T_inf": 0.7625251148462502,
       "gap_quantiles_s": {
-        "0.1": 1.0,
-        "0.25": 15.0,
-        "0.5": 49.0,
-        "0.75": 1886.0,
-        "0.9": 19837.0
+        "0.1": 0.0,
+        "0.25": 10.0,
+        "0.5": 21.0,
+        "0.75": 116.0,
+        "0.9": 37251.59999999963
       },
       "fresh_share": 1.0,
-      "rows_dropped_no_key_or_ts": 0
+      "rows_dropped_no_key_or_ts": 61526
     },
     {
-      "stream": "revtr (excl. top 10 pairs)",
-      "events": 5795117,
-      "pairs": 840311,
-      "pairs_with_repeat": 483822,
-      "events_in_repeat_pairs": 5438628,
-      "largest_pair_events": 9725,
-      "largest_pair_share": 0.0016781369556473147,
-      "top10_pairs_share": 0.01649958059518039,
-      "ceiling_hit_rate_T_inf": 0.8549967153381027,
+      "stream": "revtr (excl. top 10 keys)",
+      "granularity": "ip",
+      "events": 12938067,
+      "keys": 3127534,
+      "keys_with_repeat": 1937656,
+      "events_in_repeat_keys": 11748189,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 6.0,
+        "0.99": 28.0
+      },
+      "largest_key_events": 22958,
+      "largest_key_share": 0.0017744536336069367,
+      "top10_keys_share": 0.017700480295858724,
+      "ceiling_hit_rate_T_inf": 0.7582688356769215,
       "gap_quantiles_s": {
-        "0.1": 1.0,
-        "0.25": 15.0,
-        "0.5": 54.0,
-        "0.75": 2075.0,
-        "0.9": 20878.0
+        "0.1": 0.0,
+        "0.25": 10.0,
+        "0.5": 21.0,
+        "0.75": 140.0,
+        "0.9": 39885.0
       },
       "fresh_share": 1.0,
-      "rows_dropped_no_key_or_ts": 0
+      "rows_dropped_no_key_or_ts": 61526
+    },
+    {
+      "stream": "revtr",
+      "granularity": "p24",
+      "events": 13169999,
+      "keys": 1325186,
+      "keys_with_repeat": 970079,
+      "events_in_repeat_keys": 12814892,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 13.0,
+        "0.99": 96.0
+      },
+      "largest_key_events": 23518,
+      "largest_key_share": 0.0017857252684681298,
+      "top10_keys_share": 0.017610631557375214,
+      "ceiling_hit_rate_T_inf": 0.8993784281988176,
+      "gap_quantiles_s": {
+        "0.1": 0.0,
+        "0.25": 12.0,
+        "0.5": 28.0,
+        "0.75": 1483.0,
+        "0.9": 35888.0
+      },
+      "fresh_share": 1.0,
+      "rows_dropped_no_key_or_ts": 61526
+    },
+    {
+      "stream": "revtr (excl. top 10 keys)",
+      "granularity": "p24",
+      "events": 12938067,
+      "keys": 1325176,
+      "keys_with_repeat": 970069,
+      "events_in_repeat_keys": 12582960,
+      "events_per_key_quantiles": {
+        "0.5": 2.0,
+        "0.9": 13.0,
+        "0.99": 96.0
+      },
+      "largest_key_events": 22958,
+      "largest_key_share": 0.0017744536336069367,
+      "top10_keys_share": 0.017700480295858724,
+      "ceiling_hit_rate_T_inf": 0.8975754260663513,
+      "gap_quantiles_s": {
+        "0.1": 0.0,
+        "0.25": 12.0,
+        "0.5": 28.0,
+        "0.75": 1665.0,
+        "0.9": 37543.0
+      },
+      "fresh_share": 1.0,
+      "rows_dropped_no_key_or_ts": 61526
     }
   ],
   "path_change": {
     "scamper": {
-      "sig_ip": {
-        "events": 11798823,
-        "hosts": 8999873,
-        "consecutive_pairs": 2798950,
-        "p_changed_overall": 0.23866664284821093,
-        "share_of_changes_with_as_loop": 0.0
+      "ip": {
+        "sig_ip": {
+          "events": 27390105,
+          "keys": 19409983,
+          "consecutive_pairs": 7980122,
+          "p_changed_overall": 0.24706677416711173,
+          "share_of_changes_with_as_loop": 0.0
+        },
+        "sig_p24": {
+          "events": 27390105,
+          "keys": 19409983,
+          "consecutive_pairs": 7980122,
+          "p_changed_overall": 0.19008067796457248,
+          "share_of_changes_with_as_loop": 0.0
+        }
       },
-      "sig_p24": {
-        "events": 11798823,
-        "hosts": 8999873,
-        "consecutive_pairs": 2798950,
-        "p_changed_overall": 0.18001500562711018,
-        "share_of_changes_with_as_loop": 0.0
+      "p24": {
+        "sig_ip": {
+          "events": 27390105,
+          "keys": 6935616,
+          "consecutive_pairs": 20454489,
+          "p_changed_overall": 0.5170134536237987,
+          "share_of_changes_with_as_loop": 0.0
+        },
+        "sig_p24": {
+          "events": 27390105,
+          "keys": 6935616,
+          "consecutive_pairs": 20454489,
+          "p_changed_overall": 0.31155234432891477,
+          "share_of_changes_with_as_loop": 0.0
+        }
       }
     },
     "revtr": {
-      "sig_ip": {
-        "events": 3147566,
-        "hosts": 618489,
-        "consecutive_pairs": 2529077,
-        "p_changed_overall": 0.07943688547244707,
-        "share_of_changes_with_as_loop": 0.0026530348129934
+      "ip": {
+        "sig_tgt": {
+          "events": 13169999,
+          "keys": 3127544,
+          "consecutive_pairs": 10042455,
+          "p_changed_overall": 0.3310126856431022,
+          "share_of_changes_with_as_loop": 0.0004759068401831429
+        },
+        "sig_ip": {
+          "events": 6910430,
+          "keys": 1772814,
+          "consecutive_pairs": 5137616,
+          "p_changed_overall": 0.10929037903961682,
+          "share_of_changes_with_as_loop": 0.0024933569846053018
+        },
+        "sig_as": {
+          "events": 6889447,
+          "keys": 1767761,
+          "consecutive_pairs": 5121686,
+          "p_changed_overall": 0.04713428351523307,
+          "share_of_changes_with_as_loop": 0.0048175902107229695
+        },
+        "sig_rr_ip": {
+          "events": 3945780,
+          "keys": 1180643,
+          "consecutive_pairs": 2765137,
+          "p_changed_overall": 0.08330509482893614,
+          "share_of_changes_with_as_loop": 0.004132841328413284
+        },
+        "sig_rr_as": {
+          "events": 3888448,
+          "keys": 1161532,
+          "consecutive_pairs": 2726916,
+          "p_changed_overall": 0.0290771699604975,
+          "share_of_changes_with_as_loop": 0.01088395908741219
+        }
       },
-      "sig_as": {
-        "events": 3138535,
-        "hosts": 616424,
-        "consecutive_pairs": 2522111,
-        "p_changed_overall": 0.03243830267581403,
-        "share_of_changes_with_as_loop": 0.005365895395597277
-      },
-      "sig_rr_ip": {
-        "events": 1762246,
-        "hosts": 387954,
-        "consecutive_pairs": 1374292,
-        "p_changed_overall": 0.06263152226746573,
-        "share_of_changes_with_as_loop": 0.004135976020633409
-      },
-      "sig_rr_as": {
-        "events": 1738938,
-        "hosts": 379656,
-        "consecutive_pairs": 1359282,
-        "p_changed_overall": 0.02072785485278257,
-        "share_of_changes_with_as_loop": 0.011712511091393079
+      "p24": {
+        "sig_tgt": {
+          "events": 13169999,
+          "keys": 1325186,
+          "consecutive_pairs": 11844813,
+          "p_changed_overall": 0.3219267370451522,
+          "share_of_changes_with_as_loop": 0.0004956516402922299
+        },
+        "sig_ip": {
+          "events": 6910430,
+          "keys": 893076,
+          "consecutive_pairs": 6017354,
+          "p_changed_overall": 0.1952354805783406,
+          "share_of_changes_with_as_loop": 0.0076753424622553095
+        },
+        "sig_as": {
+          "events": 6889447,
+          "keys": 891690,
+          "consecutive_pairs": 5997757,
+          "p_changed_overall": 0.07238706069619026,
+          "share_of_changes_with_as_loop": 0.017295467108899943
+        },
+        "sig_rr_ip": {
+          "events": 3945780,
+          "keys": 570730,
+          "consecutive_pairs": 3375050,
+          "p_changed_overall": 0.16084354305862136,
+          "share_of_changes_with_as_loop": 0.015486640078842416
+        },
+        "sig_rr_as": {
+          "events": 3888448,
+          "keys": 564624,
+          "consecutive_pairs": 3323824,
+          "p_changed_overall": 0.053287418347060495,
+          "share_of_changes_with_as_loop": 0.03987172393545546
+        }
       }
     }
   }

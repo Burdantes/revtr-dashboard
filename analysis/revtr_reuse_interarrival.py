@@ -1,13 +1,32 @@
 """Could a reverse traceroute be reused across NDT tests from the same pair,
 and how often would the reused path be wrong?
 
-Three arrival streams, keyed by the pair a measurement is keyed on:
+Three arrival streams:
 
-  ndt      completed NDT7 tests,          key (server.Site, client /24 or /48)
+  ndt      completed NDT7 tests,          server = server.Site
   scamper  traceroute-caller, one row per TCP connection (cached or fresh),
-                                          key (Tracelb.src, client /24 or /48)
-  revtr    RevTr sidecar firings,         key (raw.src, raw.dst)  -- dst is already /24
+                                          server = Tracelb.src
+  revtr    RevTr sidecar firings,         server = raw.src
            (label ndt_revtr_sidecar; the load a cache would remove)
+
+Every analysis runs at two granularities of the cache key:
+
+  ip       (server, exact client IP)
+  p24      (server, client /24, /48 for IPv6) -- the IP-level events aggregated
+
+The client IP is raw.ClientIP (ndt) and Tracelb.dst (scamper). revtr raw.dst is
+only the /24 written as x.y.z.0, so its client IP comes from joining raw.uuid
+(the ndt-server connection UUID) to scamper1 raw.Metadata.UUID -> Tracelb.dst,
+falling back to the hop_type = 1 hop when the connection has no scamper row.
+summary.json reports how many revtr events took each route, and how often the
+hop_type = 1 address equals the client IP when both exist.
+
+revtr raw.dst is the /24 actually MEASURED, which is not always the client's:
+when the client /24 does not respond, the sidecar fires further revtrs from the
+same connection at another responsive /24 (2026-09-20: 22% of rows, 1.29
+revtrs per connection). The p24 key therefore uses the client IP's /24, so ip
+keys nest in p24 keys, and the revtr level sig_tgt (the target /24) measures
+how often a reuse would serve a result measured toward a different target.
 
 For each stream it computes the within-pair inter-arrival distribution and,
 for a grid of staleness thresholds T, the share of events that would NOT need
@@ -22,11 +41,10 @@ rates are slightly conservative for long T.
 
 Path change (scamper and revtr only). Restricted to events that carry their
 own freshly measured path (scamper: CachedResult = false; revtr: every firing
-with hops), and compared only between measurements of the SAME HOST -- the
-reuse key above is a /24, and different hosts of one /24 differ in path (and
-even in origin AS) without any route change. Host = the exact client IP
-(scamper Tracelb.dst; revtr the hop_type = 1 hop, since raw.dst is the /24
-written as x.y.z.0). It reports
+with hops), compared between consecutive measurements of the same key. At ip
+granularity a change is a route change for one host; at p24 it also counts
+two hosts of one /24 having different paths -- exactly the error a /24-keyed
+cache would make by serving one host's path to another. It reports
 
   path_change_by_gap.csv   consecutive measurements of a (server, host),
                            split by gap and by whether the signature changed;
@@ -47,6 +65,7 @@ Signatures ignore hops inside the client /24 (/48):
            sig_rr_ip  hop IP sequence of measured record-route hops only
                       (hop_type 5 RR, 6 spoofed RR)
            sig_rr_as  AS sequence of those hops -- the route-change measure;
+           sig_tgt    the measured target /24 (raw.dst);
                       the all-hop levels also move when revtr stitches the
                       path differently (type 3/4 intersections, 11/12 assumed)
 
@@ -59,8 +78,8 @@ trace up to ~655 s old, i.e. traceroute-caller's own cache is ~10 min per
 client IP). Consequence: two fresh scamper traces to the SAME client IP are
 >= ~10 min apart, so short-gap scamper path pairs are different hosts of one /24.
 
-Cost: ~10 GB for 3 partitions (scamper 8.7, revtr 1.0, ndt ~0.4), billed to
-measurement-lab. Scamper is ~33M rows for 3 days; peak RAM a few GiB.
+Cost: ~3.5 GB per day of window (scamper dominates), billed to
+measurement-lab. Scamper is ~11M rows/day; a 7-day window peaks at ~15 GiB RAM.
 """
 
 import argparse
@@ -80,18 +99,18 @@ THRESHOLDS_S = [60, 300, 600, 1800, 3600, 2 * 3600, 6 * 3600, 12 * 3600, 24 * 36
 GAP_EDGES_S = [0, 1, 10, 60, 300, 600, 1800, 3600, 2 * 3600, 6 * 3600, 12 * 3600, 24 * 3600, np.inf]
 STREAM_COLORS = {"ndt": "#2a78d6", "scamper": "#eb6834", "revtr": "#1baf7a"}
 # level -> (linestyle, marker, alpha); RR-only revtr levels drawn full, all-hop ones faded
-LEVEL_STYLES = {
-    "sig_ip": ("-", "o", 0.45),
-    "sig_p24": ("--", "o", 1.0),
-    "sig_as": ("--", "o", 0.45),
-    "sig_rr_ip": ("-", "s", 1.0),
-    "sig_rr_as": ("--", "s", 1.0),
-}
+GRANULARITIES = {"ip": "ki", "p24": "k24"}
+GRAN_STYLES = {"ip": "-", "p24": "--"}
+GRAN_LABELS = {"ip": "per IP", "p24": "per /24"}
+# (stream, level) drawn in the path panels; the rest are in the CSVs
+PLOT_LEVELS = {("revtr", "sig_rr_as"): ("o", "RR AS path"), ("revtr", "sig_ip"): ("s", "all-hop IP path"),
+               ("revtr", "sig_tgt"): ("D", "target /24"), ("scamper", "sig_p24"): ("^", "hop /24 set")}
 
 NDT_SQL = """
 SELECT
+  FARM_FINGERPRINT(CONCAT(server.Site, "|", raw.ClientIP)) AS ki,
   FARM_FINGERPRINT(CONCAT(server.Site, "|", NET.IP_TO_STRING(NET.IP_TRUNC(
-    NET.IP_FROM_STRING(raw.ClientIP), IF(STRPOS(raw.ClientIP, ":") > 0, 48, 24))))) AS k,
+    NET.IP_FROM_STRING(raw.ClientIP), IF(STRPOS(raw.ClientIP, ":") > 0, 48, 24))))) AS k24,
   UNIX_SECONDS(a.TestTime) AS ts
 FROM `measurement-lab.ndt.ndt7`
 WHERE date BETWEEN @start AND @end
@@ -125,8 +144,8 @@ t AS (
   WHERE date BETWEEN DATE_SUB(@start, INTERVAL 1 DAY) AND DATE_ADD(@end, INTERVAL 1 DAY)
   GROUP BY 1)
 SELECT
-  FARM_FINGERPRINT(CONCAT(h.src, "|", NET.IP_TO_STRING(h.dpfx))) AS k,
-  FARM_FINGERPRINT(CONCAT(h.src, "|", h.dst)) AS pk,
+  FARM_FINGERPRINT(CONCAT(h.src, "|", h.dst)) AS ki,
+  FARM_FINGERPRINT(CONCAT(h.src, "|", NET.IP_TO_STRING(h.dpfx))) AS k24,
   t.ts, h.fresh,
   IF(h.fresh, (SELECT FARM_FINGERPRINT(STRING_AGG(x.addr, "," ORDER BY x.addr))
                FROM UNNEST(h.hops) x), NULL) AS sig_ip,
@@ -136,9 +155,15 @@ FROM h LEFT JOIN t USING (uuid)
 """
 
 REVTR_SQL = """
-WITH r AS (
+WITH sc AS (
+  -- connection UUID -> exact client IP; +/-1 day for the revtr partition offset
+  SELECT raw.Metadata.UUID AS uuid, ANY_VALUE(raw.Tracelb.dst) AS cip
+  FROM `measurement-lab.ndt.scamper1`
+  WHERE date BETWEEN DATE_SUB(@start, INTERVAL 1 DAY) AND DATE_ADD(@end, INTERVAL 1 DAY)
+  GROUP BY 1),
+r0 AS (
   SELECT
-    raw.src, raw.dst, raw.date AS ts,
+    raw.uuid, raw.src, raw.dst, raw.date AS ts,
     (SELECT h.hop_ip FROM UNNEST(raw.revtr_hops) h WHERE h.hop_type = 1
      ORDER BY h.hop_number LIMIT 1) AS host,
     -- hops outside the client /24 (and not the server itself)
@@ -152,6 +177,12 @@ WITH r AS (
   FROM `measurement-lab.revtr_raw.revtr1` t
   WHERE t.date BETWEEN @start AND @end
     AND raw.label = "ndt_revtr_sidecar"),
+r AS (
+  SELECT r0.*, COALESCE(sc.cip, r0.host) AS cip,
+    CASE WHEN sc.cip IS NOT NULL THEN 0 WHEN r0.host IS NOT NULL THEN 1 ELSE 2 END AS ip_src,
+    sc.cip IS NOT NULL AND r0.host IS NOT NULL AND sc.cip = r0.host AS host_eq_cip,
+    sc.cip IS NOT NULL AND r0.host IS NOT NULL AS both_known
+  FROM r0 LEFT JOIN sc USING (uuid)),
 c AS (
   SELECT *,
     ARRAY(SELECT asn FROM (
@@ -164,9 +195,13 @@ c AS (
           WHERE prev IS NULL OR prev != asn ORDER BY n) AS as_rr
   FROM r)
 SELECT
-  FARM_FINGERPRINT(CONCAT(src, "|", dst)) AS k,
-  FARM_FINGERPRINT(CONCAT(src, "|", host)) AS pk,
-  ts, TRUE AS fresh,
+  FARM_FINGERPRINT(CONCAT(src, "|", cip)) AS ki,
+  FARM_FINGERPRINT(CONCAT(src, "|", NET.IP_TO_STRING(NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(cip),
+    IF(STRPOS(cip, ":") > 0, 48, 24))))) AS k24,
+  ts, TRUE AS fresh, ip_src, host_eq_cip, both_known,
+  IFNULL(NET.IP_TO_STRING(NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(cip), 24)) = dst, FALSE) AS direct,
+  ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY ts) > 1 AS repeat_in_conn,
+  FARM_FINGERPRINT(dst) AS sig_tgt,
   (SELECT FARM_FINGERPRINT(STRING_AGG(x.ip, ">" ORDER BY x.n)) FROM UNNEST(hops) x) AS sig_ip,
   (SELECT FARM_FINGERPRINT(STRING_AGG(CAST(a AS STRING), ">" ORDER BY o))
    FROM UNNEST(as_all) a WITH OFFSET o) AS sig_as,
@@ -190,19 +225,35 @@ def fetch(client, sql, start, end):
             bigquery.ScalarQueryParameter("end", "DATE", end),
         ]
     )
-    df = client.query(sql, job_config=cfg).to_dataframe()
+    job = client.query(sql, job_config=cfg)
+    df = job.result().to_dataframe()
+    print(f"  billed {job.total_bytes_billed / 2**30:.2f} GiB", flush=True)
+    diag = {}
+    if "ip_src" in df:
+        n = len(df)
+        diag = {
+            "events": n,
+            "client_ip_from_scamper_uuid": int((df["ip_src"] == 0).sum()),
+            "client_ip_from_hop_type_1": int((df["ip_src"] == 1).sum()),
+            "client_ip_unknown_dropped": int((df["ip_src"] == 2).sum()),
+            "hop_type_1_equals_client_ip": float(df.loc[df["both_known"], "host_eq_cip"].mean()),
+            "target_is_client_p24": float(df["direct"].mean()),
+            "repeat_revtr_within_same_connection": float(df["repeat_in_conn"].mean()),
+        }
+        df = df.drop(columns=["ip_src", "host_eq_cip", "both_known", "direct", "repeat_in_conn"])
     n_raw = len(df)
-    df = df.dropna(subset=["k", "ts"]).astype({"k": "int64", "ts": "int64"})
+    # both keys must exist so that ip and p24 are computed over the same events
+    df = df.dropna(subset=["ki", "k24", "ts"]).astype({"ki": "int64", "k24": "int64", "ts": "int64"})
     if "fresh" in df:
         df["fresh"] = df["fresh"].fillna(False).astype(bool)
-    for c in sig_cols(df) + (["pk"] if "pk" in df else []):
+    for c in sig_cols(df):
         df[c] = df[c].astype("Int64")
     if "loop" in df:
         df["loop"] = df["loop"].fillna(False).astype(bool)
-    return df, n_raw - len(df)
+    return df, n_raw - len(df), diag
 
 
-def prepare(df, key="k"):
+def prepare(df, key):
     """Sort by (key, ts); return sorted df, group ids, timestamps, group start/end indices."""
     df = df.sort_values([key, "ts"], kind="stable")
     g = pd.factorize(df[key].to_numpy(), sort=False)[0]
@@ -235,8 +286,8 @@ def fill_misses(g, ts, starts, ends, ttl):
     return miss
 
 
-def analyse(name, df):
-    _, g, ts, starts, ends = prepare(df)
+def analyse(name, gran, df, key):
+    _, g, ts, starts, ends = prepare(df[[key, "ts"]], key)
     n, pairs = len(ts), len(starts)
     same = np.r_[False, g[1:] == g[:-1]]
     gaps = np.diff(ts, prepend=ts[0])[same]
@@ -251,6 +302,7 @@ def analyse(name, df):
         rows.append(
             {
                 "stream": name,
+                "granularity": gran,
                 "T_s": T,
                 "sliding_hit_rate": sliding_hits / n,
                 "fill_hit_rate": fill_hits / n,
@@ -259,13 +311,15 @@ def analyse(name, df):
         )
     summary = {
         "stream": name,
+        "granularity": gran,
         "events": n,
-        "pairs": pairs,
-        "pairs_with_repeat": int((sizes > 1).sum()),
-        "events_in_repeat_pairs": int(sizes[sizes > 1].sum()),
-        "largest_pair_events": int(top1),
-        "largest_pair_share": top1 / n,
-        "top10_pairs_share": sizes[order[:10]].sum() / n,
+        "keys": pairs,
+        "keys_with_repeat": int((sizes > 1).sum()),
+        "events_in_repeat_keys": int(sizes[sizes > 1].sum()),
+        "events_per_key_quantiles": {q: float(np.quantile(sizes, q)) for q in (0.5, 0.9, 0.99)},
+        "largest_key_events": int(top1),
+        "largest_key_share": top1 / n,
+        "top10_keys_share": sizes[order[:10]].sum() / n,
         "ceiling_hit_rate_T_inf": (n - pairs) / n,
         "gap_quantiles_s": {q: float(np.quantile(gaps, q)) for q in (0.1, 0.25, 0.5, 0.75, 0.9)}
         if len(gaps)
@@ -276,21 +330,36 @@ def analyse(name, df):
     return pd.DataFrame(rows), summary, gaps
 
 
-def analyse_without_top(name, df, top_n):
-    sizes = df["k"].value_counts()
+def analyse_without_top(name, gran, df, key, top_n):
+    sizes = df[key].value_counts()
     drop = set(sizes.index[:top_n])
-    return analyse(f"{name} (excl. top {top_n} pairs)", df[~df["k"].isin(drop)])
+    return analyse(f"{name} (excl. top {top_n} keys)", gran, df[~df[key].isin(drop)], key)
 
 
-def analyse_paths(name, df):
-    """Path change between consecutive fresh measurements of the same
-    (server, host), and the fill policy re-run per host on that subsequence
-    with hits split by whether the served path matches the event's own path.
-    One pass per signature level."""
+def ips_per_p24(name, df):
+    """How the ip keys roll up into p24 keys: hosts per (server, /24)."""
+    per = df.groupby("k24")["ki"].nunique()
+    ev = df.groupby("k24").size()
+    multi = per > 1
+    return {
+        "p24_keys": int(len(per)),
+        "ips_per_p24_quantiles": {q: float(np.quantile(per, q)) for q in (0.5, 0.9, 0.99)},
+        "ips_per_p24_max": int(per.max()),
+        "share_p24_keys_with_multiple_ips": float(multi.mean()),
+        "share_events_in_multi_ip_p24": float(ev[multi].sum() / ev.sum()),
+    }
+
+
+def analyse_paths(name, gran, df, key):
+    """Path change between consecutive fresh measurements of the same key,
+    and the fill policy re-run per key on that subsequence with hits split by
+    whether the served path matches the event's own path. One pass per
+    signature level."""
     by_gap, by_T, summary = [], [], {}
     for level in sig_cols(df):
-        sub = df[df["fresh"] & df[level].notna() & df["pk"].notna()]
-        sub, g, ts, starts, ends = prepare(sub, key="pk")
+        cols = [key, "ts", level] + (["loop"] if "loop" in df else [])
+        sub = df.loc[df["fresh"] & df[level].notna(), cols]
+        sub, g, ts, starts, ends = prepare(sub, key)
         sig = sub[level].to_numpy(np.int64)
         n = len(ts)
         same = np.r_[False, g[1:] == g[:-1]]
@@ -309,6 +378,7 @@ def analyse_paths(name, df):
             .reset_index()
         )
         t.insert(0, "level", level)
+        t.insert(0, "granularity", gran)
         t.insert(0, "stream", name)
         t["gap_lo_s"] = [iv.left for iv in t["bin"]]
         t["gap_hi_s"] = [iv.right for iv in t["bin"]]
@@ -319,13 +389,14 @@ def analyse_paths(name, df):
         idx = np.arange(n)
         for T in THRESHOLDS_S:
             miss = fill_misses(g, ts, starts, ends, T)
-            # every pair's first event is a miss, so the running max stays in-pair
+            # every key's first event is a miss, so the running max stays in-key
             serve = np.maximum.accumulate(np.where(miss, idx, 0))
             hit = ~miss
             stale = hit & (sig != sig[serve])
             by_T.append(
                 {
                     "stream": name,
+                    "granularity": gran,
                     "level": level,
                     "T_s": T,
                     "events": n,
@@ -337,7 +408,7 @@ def analyse_paths(name, df):
             )
         summary[level] = {
             "events": n,
-            "hosts": len(starts),
+            "keys": len(starts),
             "consecutive_pairs": int(same.sum()),
             "p_changed_overall": float(changed.mean()) if len(changed) else None,
             "share_of_changes_with_as_loop": float((changed & loop).sum() / max(changed.sum(), 1)),
@@ -345,14 +416,15 @@ def analyse_paths(name, df):
     return pd.concat(by_gap, ignore_index=True), pd.DataFrame(by_T), summary
 
 
-def plot(results, gaps_by_stream, by_gap, by_T, stamp, out):
+def plot(results, gaps, by_gap, by_T, stamp, out):
     fig, ax = plt.subplots(2, 2, figsize=(12, 9))
     a = ax[0, 0]
-    for name, gaps in gaps_by_stream.items():
-        g = np.sort(np.maximum(gaps, 1))
-        a.plot(g, np.arange(1, len(g) + 1) / len(g), lw=2, color=STREAM_COLORS[name], label=name)
+    for (name, gran), gp in gaps.items():
+        g = np.sort(np.maximum(gp, 1))
+        a.plot(g, np.arange(1, len(g) + 1) / len(g), lw=2, ls=GRAN_STYLES[gran],
+               color=STREAM_COLORS[name], label=f"{name} {GRAN_LABELS[gran]}")
     a.set_xscale("log")
-    a.set_xlabel("inter-arrival within pair (s)")
+    a.set_xlabel("inter-arrival within key (s)")
     a.set_ylabel("CDF over repeat events")
     a.set_title("inter-arrival, all events", fontsize=10)
     for x, lbl in [(60, "1m"), (600, "10m"), (3600, "1h"), (86400, "1d")]:
@@ -361,42 +433,46 @@ def plot(results, gaps_by_stream, by_gap, by_T, stamp, out):
     a.legend(fontsize=8, loc="upper left")
 
     a = ax[0, 1]
-    for name, df in results[results["stream"].isin(STREAM_COLORS)].groupby("stream", sort=False):
-        c = STREAM_COLORS[name]
-        a.plot(df["T_s"], df["fill_hit_rate"], lw=2, marker="o", color=c, label=f"{name} fill")
-        a.plot(df["T_s"], df["sliding_hit_rate"], lw=2, ls="--", color=c, alpha=0.6)
+    main_rows = results[results["stream"].isin(STREAM_COLORS)]
+    for (name, gran), df in main_rows.groupby(["stream", "granularity"], sort=False):
+        a.plot(df["T_s"], df["fill_hit_rate"], lw=2, marker="o", ls=GRAN_STYLES[gran],
+               color=STREAM_COLORS[name], label=f"{name} {GRAN_LABELS[gran]}")
     a.set_xscale("log")
     a.set_xlabel("staleness threshold T (s)")
-    a.set_ylabel("share of measurements avoided")
+    a.set_ylabel("share of measurements avoided (fill TTL)")
     a.set_ylim(0, 1)
     a.set_title("reuse, all events", fontsize=10)
-    a.legend(fontsize=8, loc="lower right", title="solid = fill TTL, dashed = sliding", title_fontsize=8)
+    a.legend(fontsize=8, loc="lower right")
 
     a = ax[1, 0]
-    for (name, level), df in by_gap.groupby(["stream", "level"], sort=False):
+    for (name, gran, level), df in by_gap.groupby(["stream", "granularity", "level"], sort=False):
+        if (name, level) not in PLOT_LEVELS:
+            continue
         df = df[df["pairs"] >= 100]
         mid = np.sqrt(np.maximum(df["gap_lo_s"], 0.5) * np.where(np.isinf(df["gap_hi_s"]), 172800, df["gap_hi_s"]))
-        ls, mk, al = LEVEL_STYLES[level]
-        a.plot(mid, df["p_changed"], lw=2, marker=mk, ls=ls, alpha=al,
-               color=STREAM_COLORS[name], label=f"{name} {level[4:]}")
+        mk, lbl = PLOT_LEVELS[(name, level)]
+        a.plot(mid, df["p_changed"], lw=2, marker=mk, ls=GRAN_STYLES[gran],
+               color=STREAM_COLORS[name], label=f"{name} {lbl}, {GRAN_LABELS[gran]}")
     a.set_xscale("log")
     a.set_xlabel("gap between consecutive fresh measurements (s, bin midpoint)")
     a.set_ylabel("P(path changed)")
     a.set_ylim(0, 1)
-    a.set_title("path change vs gap, same host (bins with >= 100 pairs)", fontsize=10)
-    a.legend(fontsize=8, loc="upper left")
+    a.set_title("change between consecutive fresh measurements (bins >= 100 pairs)", fontsize=10)
+    a.legend(fontsize=7, loc="upper left", ncol=2)
 
     a = ax[1, 1]
-    for (name, level), df in by_T.groupby(["stream", "level"], sort=False):
-        ls, mk, al = LEVEL_STYLES[level]
-        a.plot(df["T_s"], df["changed_share_of_hits"], lw=2, marker=mk, ls=ls, alpha=al,
-               color=STREAM_COLORS[name], label=f"{name} {level[4:]}")
+    for (name, gran, level), df in by_T.groupby(["stream", "granularity", "level"], sort=False):
+        if (name, level) not in PLOT_LEVELS:
+            continue
+        mk, lbl = PLOT_LEVELS[(name, level)]
+        a.plot(df["T_s"], df["changed_share_of_hits"], lw=2, marker=mk,
+               ls=GRAN_STYLES[gran], color=STREAM_COLORS[name], label=f"{name} {lbl}, {GRAN_LABELS[gran]}")
     a.set_xscale("log")
     a.set_xlabel("staleness threshold T (s)")
     a.set_ylabel("share of cache hits served a changed path")
     a.set_ylim(0, 1)
-    a.set_title("fill policy per host, fresh measurements", fontsize=10)
-    a.legend(fontsize=8, loc="upper left")
+    a.set_title("fill policy: share of hits serving a different result", fontsize=10)
+    a.legend(fontsize=7, loc="upper left", ncol=2)
 
     fig.suptitle(stamp, fontsize=8, x=0.99, ha="right")
     fig.tight_layout()
@@ -406,33 +482,58 @@ def plot(results, gaps_by_stream, by_gap, by_T, stamp, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2026-09-20")
-    ap.add_argument("--end", default="2026-09-22")
+    ap.add_argument("--end", default="2026-09-26")
     ap.add_argument("--out", default=str(Path(__file__).parent / "out"))
+    ap.add_argument("--dry-run", action="store_true", help="print bytes per query and exit")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     client = bigquery.Client(project=BILLING_PROJECT)
-    frames, dropped = {}, {}
-    for name, sql in [("ndt", NDT_SQL), ("scamper", SCAMPER_SQL), ("revtr", REVTR_SQL)]:
-        frames[name], dropped[name] = fetch(client, sql, args.start, args.end)
+    queries = [("ndt", NDT_SQL), ("scamper", SCAMPER_SQL), ("revtr", REVTR_SQL)]
+    if args.dry_run:
+        total = 0
+        for name, sql in queries:
+            cfg = bigquery.QueryJobConfig(
+                dry_run=True, use_query_cache=False,
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("start", "DATE", args.start),
+                    bigquery.ScalarQueryParameter("end", "DATE", args.end),
+                ],
+            )
+            b = client.query(sql, job_config=cfg).total_bytes_processed
+            total += b
+            print(f"{name}: {b / 2**30:.1f} GiB")
+        print(f"total {total / 2**30:.1f} GiB ~ ${total / 2**40 * 6.25:.2f} list, billed to {BILLING_PROJECT}")
+        return
+
+    frames, dropped, diag = {}, {}, {}
+    for name, sql in queries:
+        frames[name], dropped[name], d = fetch(client, sql, args.start, args.end)
+        if d:
+            diag[name] = d
         print(f"{name}: {len(frames[name]):,} rows ({dropped[name]:,} dropped: no key/ts)", flush=True)
 
     results, summaries, gaps = [], [], {}
-    path_gap, path_T, path_summary = [], [], {}
+    path_gap, path_T, path_summary, rollup = [], [], {}, {}
     for name, df in frames.items():
-        for fn in (lambda: analyse(name, df), lambda: analyse_without_top(name, df, 10)):
-            r, s, gp = fn()
-            s["rows_dropped_no_key_or_ts"] = dropped[name]
-            results.append(r)
-            summaries.append(s)
-            if s["stream"] == name:
-                gaps[name] = gp
-        if sig_cols(df):
-            bg, bt, ps = analyse_paths(name, df)
-            path_gap.append(bg)
-            path_T.append(bt)
-            path_summary[name] = ps
+        rollup[name] = ips_per_p24(name, df)
+        for gran, key in GRANULARITIES.items():
+            for top in (None, 10):
+                if top is None:
+                    r, s, gp = analyse(name, gran, df, key)
+                    gaps[(name, gran)] = gp
+                else:
+                    r, s, _ = analyse_without_top(name, gran, df, key, top)
+                s["rows_dropped_no_key_or_ts"] = dropped[name]
+                results.append(r)
+                summaries.append(s)
+            if sig_cols(df):
+                bg, bt, ps = analyse_paths(name, gran, df, key)
+                path_gap.append(bg)
+                path_T.append(bt)
+                path_summary.setdefault(name, {})[gran] = ps
+            print(f"{name} {gran}: done", flush=True)
     results = pd.concat(results, ignore_index=True)
     path_gap = pd.concat(path_gap, ignore_index=True)
     path_T = pd.concat(path_T, ignore_index=True)
@@ -444,6 +545,8 @@ def main():
         "provenance": "measured",
         "generated_by": Path(__file__).name,
         "generated_on": pd.Timestamp.now("UTC").strftime("%Y-%m-%d"),
+        "revtr_client_ip_source": diag.get("revtr"),
+        "ip_to_p24_rollup": rollup,
         "summaries": summaries,
         "path_change": path_summary,
     }
@@ -451,9 +554,6 @@ def main():
     stamp = f"measured -- {Path(__file__).name} -- {args.start}..{args.end} -- generated {meta['generated_on']}"
     plot(results, gaps, path_gap, path_T, stamp, out / "reuse_interarrival.png")
     print(json.dumps(meta, indent=2, default=float))
-    print(results.to_string(index=False))
-    print(path_gap.to_string(index=False))
-    print(path_T.to_string(index=False))
 
 
 if __name__ == "__main__":
